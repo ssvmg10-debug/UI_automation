@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  # API Service
+  api:
+    build: .
+    container_name: ui-automation-api
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - HEADLESS=true
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./logs:/app/logs
+      - ./screenshots:/app/screenshots
+      - ./memory_data:/app/memory_data
+    restart: unless-stopped
+    networks:
+      - automation-network
+  
+  # Streamlit UI Service
+  ui:
+    build: .
+    container_name: ui-automation-ui
+    ports:
+      - "8501:8501"
+    environment:
+      - API_BASE_URL=http://api:8000
+    command: streamlit run ui/streamlit_app.py --server.port=8501 --server.address=0.0.0.0
+    depends_on:
+      - api
+    restart: unless-stopped
+    networks:
+      - automation-network
+
+networks:
+  automation-network:
+    driver: bridge
