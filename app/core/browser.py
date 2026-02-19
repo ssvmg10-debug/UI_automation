@@ -34,7 +34,7 @@ class BrowserManager:
             Playwright Page object
         """
         try:
-            logger.info("Starting browser...")
+            logger.info("[BROWSER] Starting Chromium (headless=%s)...", self.headless)
             self.playwright = await async_playwright().start()
             
             self.browser = await self.playwright.chromium.launch(
@@ -46,10 +46,9 @@ class BrowserManager:
                 viewport={'width': 1920, 'height': 1080}
             )
             
-            # Set default timeout
             self.page.set_default_timeout(self.timeout)
             
-            logger.info("Browser started successfully")
+            logger.info("[BROWSER] ✓ Browser and page ready")
             return self.page
             
         except Exception as e:
@@ -66,8 +65,8 @@ class BrowserManager:
         if not self.page:
             raise RuntimeError("Browser not started")
         
-        logger.info(f"Navigating to: {url}")
-        await self.page.goto(url, wait_until="domcontentloaded")
+        logger.info("[BROWSER] Navigating to: %s", url[:80] if url else "")
+        await self.page.goto(url, wait_until="load", timeout=self.timeout)
         
     async def close(self) -> None:
         """Close browser and cleanup resources."""

@@ -7,12 +7,14 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any, Literal
 import asyncio
 import logging
+import traceback
 
 from app.agents.orchestrator import AutomationOrchestrator
 from app.telemetry.metrics import metrics_collector
 from app.telemetry.logger import setup_logging
 from app.config import settings
 from app.compiler.script_generator import ScriptGenerator
+from app.logging_config import add_app_handlers_to_root
 
 # Setup logging
 setup_logging(
@@ -49,6 +51,7 @@ class ExecutionRequest(BaseModel):
     headless: bool = True
     max_recovery_attempts: int = 2
     script_language: Literal["javascript", "typescript"] = "typescript"
+    use_v3: bool = False  # Use SAM-V3 engine (SmartLocator) when True
 
 
 class ExecutionResponse(BaseModel):
@@ -65,6 +68,7 @@ class ExecutionResponse(BaseModel):
 async def startup_event():
     """Initialize on startup."""
     global orchestrator
+    add_app_handlers_to_root()  # Ensure backend.log gets all logs (survives uvicorn dictConfig)
     logger.info("Starting Enterprise UI Automation Platform...")
     logger.info(f"API Host: {settings.API_HOST}:{settings.API_PORT}")
     logger.info(f"Headless Mode: {settings.HEADLESS}")
@@ -106,23 +110,36 @@ async def execute_test(request: ExecutionRequest):
     Returns:
         Execution response with results
     """
-    logger.info(f"Received execution request: {request.instruction[:100]}...")
+    # Print so it shows even if logging is buffered (e.g. uvicorn --reload child on Windows)
+    print("\n[BACKEND] POST /execute received - running test...", flush=True)
+    logger.info("=" * 60)
+    logger.info("EXECUTE REQUEST (from UI)")
+    logger.info("Instruction: %s", request.instruction[:200] + ("..." if len(request.instruction) > 200 else ""))
+    logger.info("Headless: %s | Max recovery: %s | Script lang: %s", request.headless, request.max_recovery_attempts, request.script_language)
+    logger.info("=" * 60)
     
     try:
-        # Create orchestrator
-        orchestrator = AutomationOrchestrator(
-            max_recovery_attempts=request.max_recovery_attempts,
-            headless=request.headless
-        )
+        logger.info("[API] Creating orchestrator (use_v3=%s)...", request.use_v3)
+        if request.use_v3:
+            from app.orchestrator_v3 import AutomationOrchestratorV3
+            orchestrator = AutomationOrchestratorV3(
+                max_recovery_attempts=request.max_recovery_attempts,
+                headless=request.headless
+            )
+        else:
+            orchestrator = AutomationOrchestrator(
+                max_recovery_attempts=request.max_recovery_attempts,
+                headless=request.headless
+            )
         
-        # Start metrics tracking
         metrics_collector.start_execution(
             test_name=request.instruction[:50],
             steps_total=0
         )
         
-        # Execute
+        logger.info("[API] Calling orchestrator.run() - see logs below for each step.")
         result = await orchestrator.run(request.instruction)
+        logger.info("[API] Orchestrator finished. Steps: %s/%s, success: %s", result.get("steps_executed"), result.get("total_steps"), result.get("success"))
         
         # Generate script from execution steps
         generated_script = None
@@ -159,6 +176,7 @@ async def execute_test(request: ExecutionRequest):
         
     except Exception as e:
         logger.error(f"Execution failed: {e}")
+        logger.error("Backend traceback:\n%s", traceback.format_exc())
         metrics_collector.complete_execution(False)
         raise HTTPException(status_code=500, detail=str(e))
 

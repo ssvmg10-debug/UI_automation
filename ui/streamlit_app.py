@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 # API endpoint
-API_BASE_URL = "http://localhost:8000"
+API_BASE_URL = "http://localhost:8001"
 
 # Title and description
 st.title("🤖 Enterprise UI Automation Platform")
@@ -33,8 +33,9 @@ This platform uses a 4-layer architecture:
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    headless = st.checkbox("Headless Mode", value=True)
+    # Browser always runs in headed mode (visible) - no headless option
     max_recovery = st.slider("Max Recovery Attempts", 0, 5, 2)
+    use_v3 = st.checkbox("Use SAM-V3 Engine", value=True, help="SAM-V3: Vision+DOM+Semantic fusion, self-healing. Recommended for LG/e-commerce flows.")
     
     script_language = st.selectbox(
         "Script Language",
@@ -56,6 +57,8 @@ with st.sidebar:
             st.metric("Success Rate", f"{health['timestamp']['success_rate']:.1f}%")
     except:
         st.error("✗ API Unreachable")
+    
+    st.caption("Backend logs: logs\\backend.log, logs\\uvicorn.log")
 
 # Main tabs
 tab1, tab2, tab3 = st.tabs(["🚀 Execute Test", "📈 Metrics", "📚 Documentation"])
@@ -64,41 +67,9 @@ tab1, tab2, tab3 = st.tabs(["🚀 Execute Test", "📈 Metrics", "📚 Documenta
 with tab1:
     st.header("Execute Test Case")
     
-    # Example test cases
-    examples = {
-        "LG E-commerce": """Navigate to https://www.lg.com/in
-Click Air Solutions
-Click Split AC
-Click the first product
-Click Buy Now""",
-        
-        "Simple Login": """Go to https://example.com
-Click Login
-Type test@example.com in Email
-Type password123 in Password
-Click Submit""",
-        
-        "Search and Filter": """Navigate to https://example.com
-Type "laptop" in Search
-Click Search button
-Wait for Results
-Click Price filter"""
-    }
-    
-    selected_example = st.selectbox(
-        "Load Example",
-        ["Custom"] + list(examples.keys())
-    )
-    
-    # Test instruction input
-    if selected_example != "Custom":
-        default_instruction = examples[selected_example]
-    else:
-        default_instruction = ""
-    
     instruction = st.text_area(
         "Test Case (Natural Language)",
-        value=default_instruction,
+        value="",
         height=200,
         placeholder="Enter test steps in natural language...\nExample:\nGo to https://example.com\nClick Login button\nType test@test.com in Email field"
     )
@@ -106,7 +77,7 @@ Click Price filter"""
     col1, col2 = st.columns([1, 4])
     
     with col1:
-        execute_btn = st.button("▶️ Execute", type="primary", use_container_width=True)
+        execute_btn = st.button("▶️ Execute", type="primary", width="stretch")
     
     # Execute
     if execute_btn:
@@ -120,25 +91,43 @@ Click Price filter"""
                         f"{API_BASE_URL}/execute",
                         json={
                             "instruction": instruction,
-                            "headless": headless,
+                            "headless": False,
                             "max_recovery_attempts": max_recovery,
-                            "script_language": script_language
+                            "script_language": script_language,
+                            "use_v3": use_v3
                         },
                         timeout=300  # 5 minutes
                     )
                     
                     result = response.json()
+                    steps_ok = result["steps_executed"]
+                    steps_total = result["total_steps"]
+                    success_pct = (steps_ok / steps_total * 100) if steps_total else 0
                     
-                    # Display results
-                    if result["success"]:
-                        st.success(f"✅ Test Passed! ({result['steps_executed']}/{result['total_steps']} steps)")
+                    # ---------- Execution Report (headed mode, success %, script) ----------
+                    st.subheader("📋 Execution Report")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Browser mode", "Headed (visible)")
+                    with col2:
+                        st.metric("Steps", f"{steps_ok} / {steps_total}")
+                    with col3:
+                        st.metric("Success rate", f"{success_pct:.0f}%")
+                    
+                    # Display result banner
+                    if result["success"] and steps_total > 0 and steps_ok == steps_total:
+                        st.success(f"✅ Test Passed! 100% success ({steps_ok}/{steps_total} steps) – Headed mode execution completed.")
+                    elif result["success"] and steps_total == 0:
+                        st.info("No steps to run.")
                     else:
-                        st.error(f"❌ Test Failed: {result.get('error', 'Unknown error')}")
+                        err_msg = result.get("error") or "One or more steps failed."
+                        st.error(f"❌ Test Failed: {err_msg}")
+                        st.caption(f"Steps completed: {steps_ok}/{steps_total}")
                     
-                    # Show generated script
+                    # Test script used for this run (report)
                     if result.get("generated_script"):
                         st.divider()
-                        st.subheader("📝 Generated Playwright Script")
+                        st.subheader("📝 Test script used for UI automation (download or copy)")
                         
                         script_lang = result.get("script_language", "typescript")
                         file_ext = result.get("file_extension", ".ts")
@@ -154,7 +143,7 @@ Click Price filter"""
                                 data=result["generated_script"],
                                 file_name=test_file,
                                 mime="text/plain",
-                                use_container_width=True
+                                width="stretch"
                             )
                         
                         # Display script in code block
@@ -199,7 +188,8 @@ npx playwright test {test_file} --headed
                     col1, col2, col3 = st.columns(3)
                     col1.metric("Steps Executed", result["steps_executed"])
                     col2.metric("Total Steps", result["total_steps"])
-                    col3.metric("Success Rate", f"{(result['steps_executed']/result['total_steps']*100):.1f}%")
+                    sr = (result["steps_executed"] / result["total_steps"] * 100) if result["total_steps"] else 0
+                    col3.metric("Success Rate", f"{sr:.1f}%")
                     
                     # Step results
                     if result["results"]:
@@ -269,7 +259,7 @@ with tab2:
                 })
             
             df = pd.DataFrame(df_data)
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width="stretch", hide_index=True)
         else:
             st.info("No executions yet")
         

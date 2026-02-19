@@ -1,0 +1,40 @@
+{
+  "timestamp": "2026-02-19T14:20:43.786872Z",
+  "runs_per_test": 2,
+  "total_tests": 1,
+  "results": [
+    {
+      "id": "TC6",
+      "name": "Sitemap click",
+      "success": true,
+      "steps_executed": 2,
+      "total_steps": 2,
+      "error": null,
+      "duration_seconds": 22.02,
+      "fragment_reuse_count": 0,
+      "url_shortcut_count": 1,
+      "fragments_saved": 1,
+      "run_number": 1
+    },
+    {
+      "id": "TC6",
+      "name": "Sitemap click",
+      "success": true,
+      "steps_executed": 2,
+      "total_steps": 2,
+      "error": null,
+      "duration_seconds": 15.62,
+      "fragment_reuse_count": 0,
+      "url_shortcut_count": 1,
+      "fragments_saved": 0,
+      "run_number": 2
+    }
+  ],
+  "summary": {
+    "total_passed": 2,
+    "total_failed": 0,
+    "total_fragment_reuses": 0,
+    "total_url_shortcuts": 2,
+    "total_fragments_saved": 1
+  }
+}

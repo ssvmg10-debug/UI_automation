@@ -1,0 +1,63 @@
+{
+  "timestamp": "2026-02-19T09:58:54.073340Z",
+  "total": 5,
+  "passed": 0,
+  "failed": 5,
+  "outcomes": [
+    {
+      "id": "TC1",
+      "name": "Water purifiers + buy + pincode + delivery + checkout + guest + billing",
+      "success": false,
+      "steps_executed": 1,
+      "total_steps": 11,
+      "error": null,
+      "failed_step_index": null,
+      "duration_seconds": 22.02645,
+      "use_v2": true
+    },
+    {
+      "id": "TC2",
+      "name": "Search lg tv 108cm + product + buy + pincode + delivery + checkout + guest + billing",
+      "success": false,
+      "steps_executed": 1,
+      "total_steps": 14,
+      "error": null,
+      "failed_step_index": null,
+      "duration_seconds": 151.898063,
+      "use_v2": true
+    },
+    {
+      "id": "TC3",
+      "name": "Air solutions + Split AC + product + buy + pincode + wait + delivery + checkout + guest + billing + QR + checkboxes + place order",
+      "success": false,
+      "steps_executed": 3,
+      "total_steps": 15,
+      "error": null,
+      "failed_step_index": null,
+      "duration_seconds": 55.148686,
+      "use_v2": true
+    },
+    {
+      "id": "TC4",
+      "name": "Banner buy electronics + Audio + filter party speakers + product + buy + pincode + delivery + checkout + guest + billing + QR + checkboxes + place order",
+      "success": false,
+      "steps_executed": 1,
+      "total_steps": 16,
+      "error": null,
+      "failed_step_index": null,
+      "duration_seconds": 22.924195,
+      "use_v2": true
+    },
+    {
+      "id": "TC5",
+      "name": "Sitemap click",
+      "success": false,
+      "steps_executed": 1,
+      "total_steps": 2,
+      "error": null,
+      "failed_step_index": null,
+      "duration_seconds": 21.924528,
+      "use_v2": true
+    }
+  ]
+}

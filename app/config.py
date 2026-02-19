@@ -17,9 +17,9 @@ class Settings(BaseSettings):
     # OpenAI Keys (optional, for backwards compatibility)
     OPENAI_API_KEY: Optional[str] = None
     
-    # Browser Settings
-    HEADLESS: bool = True
-    BROWSER_TIMEOUT: int = 30000
+    # Browser Settings (always headed so user can see the browser)
+    HEADLESS: bool = False
+    BROWSER_TIMEOUT: int = 60000  # 60s for slow pages (e.g. LG e-commerce)
     
     # Execution Settings
     MAX_RETRIES: int = 3
@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     # State Management
     ENABLE_STATE_TRACKING: bool = True
     MAX_STATE_HISTORY: int = 100
+
+    # Fragment Reuse
+    FRAGMENT_SAVE_ENABLED: bool = True
+    FRAGMENT_MIN_LENGTH: int = 2
     
     # Memory Settings
     ENABLE_MEMORY: bool = True

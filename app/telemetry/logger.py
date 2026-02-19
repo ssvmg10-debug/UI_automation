@@ -8,6 +8,14 @@ from typing import Optional
 from datetime import datetime
 
 
+class FlushingStreamHandler(logging.StreamHandler):
+    """StreamHandler that flushes after every emit so logs show immediately (e.g. under uvicorn --reload)."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        self.flush()
+
+
 def setup_logging(
     log_level: str = "INFO",
     log_file: Optional[str] = None,
@@ -39,28 +47,38 @@ def setup_logging(
     # Remove existing handlers
     root_logger.handlers.clear()
     
-    # Console handler
+    # Console handler - flush after each log so logs appear immediately (e.g. in uvicorn reload child)
     if console:
-        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler = FlushingStreamHandler(sys.stdout)
         console_handler.setLevel(logging.INFO)
         console_handler.setFormatter(simple_formatter)
         root_logger.addHandler(console_handler)
     
-    # File handler
+    # File handlers: automation.log (detailed) and backend.log (all app logs for easy tail)
     if log_file:
-        # Create log directory if needed
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        file_handler = logging.FileHandler(log_file)
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(detailed_formatter)
         root_logger.addHandler(file_handler)
+    # All app logs also go to logs/backend.log so you can tail one file to see everything
+    backend_log = Path("logs") / "backend.log"
+    try:
+        backend_log.parent.mkdir(parents=True, exist_ok=True)
+        backend_handler = logging.FileHandler(backend_log, mode="a", encoding="utf-8")
+        backend_handler.setLevel(getattr(logging, log_level.upper()))
+        backend_handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s [%(name)s] %(message)s", datefmt="%H:%M:%S"))
+        root_logger.addHandler(backend_handler)
+    except Exception:
+        pass
     
     # Reduce noise from third-party libraries
     logging.getLogger("playwright").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    # Stop "X change(s) detected" spam from uvicorn's file watcher (watchfiles)
+    logging.getLogger("watchfiles.main").setLevel(logging.WARNING)
 
 
 def get_logger(name: str) -> logging.Logger:

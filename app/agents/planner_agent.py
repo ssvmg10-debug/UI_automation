@@ -131,11 +131,11 @@ Return a JSON object with this structure:
 Guidelines:
 - Use NAVIGATE for going to URLs
 - Use CLICK for clicking buttons/links
-- Use TYPE for entering text in inputs
-- Use WAIT for waiting for elements to appear
+- Use TYPE for entering text in inputs (target=field label, value=text to type)
+- Use WAIT for: (1) waiting for an element (target=element text), or (2) waiting N seconds (use value: "N" e.g. value: "5" for "wait 5 seconds")
 - Use SELECT for dropdown selections
-- Be specific with target text
-- Extract exact button/link text when possible
+- Be specific with target text; extract exact button/link text when possible
+- For "wait for 5 seconds" or "wait 5 seconds" output WAIT with value: "5"
 
 Example:
 Input: "Go to example.com, click Login, enter email test@test.com, click Submit"

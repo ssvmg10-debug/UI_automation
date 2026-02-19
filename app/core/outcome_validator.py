@@ -1,6 +1,6 @@
 """
 Outcome validation - ensures state transitions are meaningful.
-This is CRITICAL to prevent random clicking behavior.
+Strong validation: DOM hash + URL; transition valid iff URL or DOM changed.
 """
 from playwright.async_api import Page
 from typing import Dict, Any, Optional
@@ -10,20 +10,29 @@ import hashlib
 logger = logging.getLogger(__name__)
 
 
+async def dom_hash(page: Page) -> str:
+    """MD5 of full page content for strong state comparison."""
+    try:
+        content = await page.content()
+        return hashlib.md5(content.encode()).hexdigest()
+    except Exception:
+        return ""
+
+
 class PageState:
-    """Represents the state of a page at a point in time."""
+    """Represents the state of a page at a point in time (url + dom hash)."""
     
     def __init__(
         self, 
         url: str, 
-        title: str, 
+        title: str = "", 
         dom_hash: Optional[str] = None,
         visible_text_hash: Optional[str] = None
     ):
         self.url = url
         self.title = title
-        self.dom_hash = dom_hash
-        self.visible_text_hash = visible_text_hash
+        self.dom_hash = dom_hash or ""
+        self.visible_text_hash = visible_text_hash or ""
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -35,17 +44,12 @@ class PageState:
         }
     
     def __eq__(self, other) -> bool:
-        """Check equality."""
         if not isinstance(other, PageState):
             return False
-        return (
-            self.url == other.url and
-            self.title == other.title and
-            self.dom_hash == other.dom_hash
-        )
+        return self.url == other.url and self.dom_hash == other.dom_hash
     
     def __repr__(self) -> str:
-        return f"PageState(url={self.url}, title={self.title})"
+        return f"PageState(url={self.url}, hash={self.dom_hash[:8] if self.dom_hash else ''})"
 
 
 class OutcomeValidator:
@@ -65,134 +69,36 @@ class OutcomeValidator:
     
     async def capture_state(self, page: Page) -> PageState:
         """
-        Capture current page state.
-        
-        Args:
-            page: Playwright page object
-            
-        Returns:
-            PageState object representing current state
+        Capture current page state: URL + full DOM content hash (MD5).
+        Transition is valid iff URL or DOM hash changed.
         """
         try:
             url = page.url
             title = await page.title()
-            
-            # Capture DOM structure hash
-            dom_hash = await self._compute_dom_hash(page)
-            
-            # Capture visible text hash
-            visible_text_hash = await self._compute_visible_text_hash(page)
-            
-            state = PageState(
-                url=url,
-                title=title,
-                dom_hash=dom_hash,
-                visible_text_hash=visible_text_hash
-            )
-            
-            logger.debug(f"Captured state: {state}")
+            hash_val = await dom_hash(page)
+            state = PageState(url=url, title=title, dom_hash=hash_val)
+            logger.debug("Captured state: %s", state)
             return state
-            
         except Exception as e:
-            logger.error(f"Error capturing state: {e}")
+            logger.error("Error capturing state: %s", e)
             raise
-    
-    async def _compute_dom_hash(self, page: Page) -> str:
-        """
-        Compute hash of DOM structure.
-        
-        Args:
-            page: Playwright page object
-            
-        Returns:
-            SHA256 hash of DOM structure
-        """
-        try:
-            dom_structure = await page.evaluate("""
-                () => {
-                    const getStructure = (node) => {
-                        if (node.nodeType !== 1) return '';
-                        return node.tagName + 
-                               Array.from(node.children).map(getStructure).join('');
-                    };
-                    return getStructure(document.body);
-                }
-            """)
-            
-            return hashlib.sha256(dom_structure.encode()).hexdigest()[:16]
-            
-        except Exception as e:
-            logger.debug(f"Could not compute DOM hash: {e}")
-            return ""
-    
-    async def _compute_visible_text_hash(self, page: Page) -> str:
-        """
-        Compute hash of visible text content.
-        
-        Args:
-            page: Playwright page object
-            
-        Returns:
-            SHA256 hash of visible text
-        """
-        try:
-            visible_text = await page.evaluate("""
-                () => {
-                    return document.body.innerText;
-                }
-            """)
-            
-            return hashlib.sha256(visible_text.encode()).hexdigest()[:16]
-            
-        except Exception as e:
-            logger.debug(f"Could not compute text hash: {e}")
-            return ""
-    
+
     def validate_transition(
-        self, 
-        before: PageState, 
+        self,
+        before: PageState,
         after: PageState,
         expected_change: Optional[str] = None
     ) -> bool:
         """
-        Validate that a meaningful state transition occurred.
-        
-        Args:
-            before: State before action
-            after: State after action
-            expected_change: Optional expected change type
-            
-        Returns:
-            True if valid transition, False otherwise
+        Strong validation: transition valid iff URL changed or DOM hash changed.
         """
-        # Check URL change
         url_changed = before.url != after.url
-        
-        # Check title change
-        title_changed = before.title != after.title
-        
-        # Check DOM change
-        dom_changed = before.dom_hash != after.dom_hash
-        
-        # Check visible text change
-        text_changed = before.visible_text_hash != after.visible_text_hash
-        
-        logger.debug(
-            f"Transition validation: URL={url_changed}, Title={title_changed}, "
-            f"DOM={dom_changed}, Text={text_changed}"
-        )
-        
-        # In strict mode, require at least one significant change
-        if self.strict_mode:
-            valid = url_changed or title_changed or dom_changed or text_changed
-        else:
-            valid = url_changed or title_changed or text_changed
-        
+        hash_changed = before.dom_hash != after.dom_hash
+        valid = url_changed or hash_changed
         if valid:
-            logger.info("✓ Valid state transition detected")
+            logger.info("✓ Valid state transition detected (URL or DOM changed)")
         else:
             logger.warning("✗ No meaningful state transition detected")
-        
         return valid
     
     def validate_navigation(self, before: PageState, after: PageState) -> bool:

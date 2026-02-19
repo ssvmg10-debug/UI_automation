@@ -6,14 +6,39 @@ from langgraph.graph import StateGraph, END
 from typing import TypedDict, List, Optional, Annotated
 import operator
 import logging
+import traceback
 
 from .planner_agent import PlannerAgent, ExecutionStep
 from .recovery_agent import RecoveryAgent, RecoveryStrategy
 from app.core.action_executor import ActionExecutor, ActionResult
 from app.core.browser import BrowserManager
 from app.core.state_manager import StateManager
+from app.flow_optimization import FragmentStore, FragmentMatcher, URLShortcutRegistry, OptimizerEngine, FlowFragment
 
 logger = logging.getLogger(__name__)
+
+
+def _steps_to_dicts(steps: List[ExecutionStep]) -> List[dict]:
+    """Convert ExecutionStep list to list of dicts for fragment matcher/optimizer."""
+    return [
+        {"action": getattr(s, "action", None), "target": getattr(s, "target", "") or "", "value": getattr(s, "value", None)}
+        for s in steps
+    ]
+
+
+def _extract_site(url: str) -> str:
+    """Extract site name from URL (e.g. lg.com)."""
+    if not url:
+        return "unknown"
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = (parsed.netloc or "").strip()
+        if host.startswith("www."):
+            host = host[4:]
+        return host or "unknown"
+    except Exception:
+        return "unknown"
 
 
 class AutomationState(TypedDict):
@@ -27,6 +52,8 @@ class AutomationState(TypedDict):
     max_recovery_attempts: int
     browser_manager: Optional[BrowserManager]
     state_manager: Optional[StateManager]
+    flow_start_url: Optional[str]
+    last_optimization_skip: Optional[int]
 
 
 class AutomationOrchestrator:
@@ -52,6 +79,10 @@ class AutomationOrchestrator:
         self.recovery_agent = RecoveryAgent()
         self.max_recovery_attempts = max_recovery_attempts
         self.headless = headless
+        self._fragment_store = FragmentStore()
+        self._fragment_matcher = FragmentMatcher(self._fragment_store)
+        self._shortcut_registry = URLShortcutRegistry()
+        self.optimizer = OptimizerEngine(self._fragment_matcher, self._shortcut_registry)
         self.graph = self._build_graph()
     
     def _build_graph(self) -> StateGraph:
@@ -71,8 +102,12 @@ class AutomationOrchestrator:
         # Set entry point
         workflow.set_entry_point("initialize")
         
-        # Add edges
-        workflow.add_edge("initialize", "plan")
+        # If initialization fails, go to cleanup; otherwise plan
+        workflow.add_conditional_edges(
+            "initialize",
+            self._after_initialize,
+            {"plan": "plan", "cleanup": "cleanup"}
+        )
         workflow.add_edge("plan", "execute")
         workflow.add_edge("execute", "validate")
         
@@ -101,16 +136,34 @@ class AutomationOrchestrator:
         
         return workflow.compile()
     
+    def _after_initialize(self, state: AutomationState) -> str:
+        """If initialization failed, go to cleanup; else continue to plan."""
+        if state.get("error") or state.get("browser_manager") is None:
+            return "cleanup"
+        return "plan"
+    
+    @staticmethod
+    def _parse_wait_seconds(step: ExecutionStep) -> Optional[float]:
+        """Parse WAIT step target/value to get seconds (e.g. '5', '5 seconds'). Returns None if not a plain wait."""
+        import re
+        for raw in (step.value, step.target):
+            if not raw:
+                continue
+            s = str(raw).strip()
+            # Extract number (e.g. "5", "5 seconds", "wait 5")
+            m = re.search(r"(\d+(?:\.\d+)?)\s*(?:second|sec|s)?", s, re.I)
+            if m:
+                return float(m.group(1))
+        return None
+    
     async def _initialize_node(self, state: AutomationState) -> AutomationState:
         """Initialize browser and state manager."""
-        logger.info("Initializing automation session...")
+        logger.info("[ORCHESTRATOR] Step: INITIALIZE - Starting browser (headed=%s)", not self.headless)
         
         try:
-            # Create browser manager
             browser_manager = BrowserManager(headless=self.headless)
             await browser_manager.start()
             
-            # Create state manager
             state_manager = StateManager()
             
             state["browser_manager"] = browser_manager
@@ -120,26 +173,27 @@ class AutomationOrchestrator:
             state["recovery_attempts"] = 0
             state["max_recovery_attempts"] = self.max_recovery_attempts
             
-            logger.info("✓ Initialization complete")
+            logger.info("[ORCHESTRATOR] Step: INITIALIZE - ✓ Browser and state manager ready")
             
         except Exception as e:
-            logger.error(f"Initialization failed: {e}")
+            logger.error("[ORCHESTRATOR] Step: INITIALIZE - ✗ Failed: %s", e)
             state["error"] = str(e)
         
         return state
     
     async def _plan_node(self, state: AutomationState) -> AutomationState:
         """Plan execution from natural language instruction."""
-        logger.info("Planning execution steps...")
+        logger.info("[ORCHESTRATOR] Step: PLAN - Converting instruction to steps...")
         
         try:
             steps = await self.planner.plan(state["instruction"])
             state["steps"] = steps
             
-            logger.info(f"✓ Generated {len(steps)} execution steps")
-            
+            logger.info("[ORCHESTRATOR] Step: PLAN - ✓ Generated %d steps", len(steps))
+            for i, s in enumerate(steps, 1):
+                logger.info("  [PLAN] Step %d: %s -> %s", i, s.action, (s.target or "")[:60])
         except Exception as e:
-            logger.error(f"Planning failed: {e}")
+            logger.error("[ORCHESTRATOR] Step: PLAN - ✗ Failed: %s", e)
             state["error"] = str(e)
         
         return state
@@ -154,13 +208,50 @@ class AutomationOrchestrator:
             return state
         
         current_step = steps[step_index]
-        logger.info(f"Executing step {step_index + 1}/{len(steps)}: {current_step}")
+        logger.info("[ORCHESTRATOR] Step: EXECUTE %d/%d - Action=%s Target=%s", step_index + 1, len(steps), current_step.action, (current_step.target or "")[:80])
         
         try:
-            browser_manager = state["browser_manager"]
+            browser_manager = state.get("browser_manager")
+            if browser_manager is None:
+                err = "Browser not initialized (initialization may have failed). Check backend logs."
+                logger.error("[ORCHESTRATOR] Step: EXECUTE %d/%d - ✗ %s", step_index + 1, len(steps), err)
+                new_result = ActionResult(success=False, error=err)
+                return {**state, "results": [new_result]}
             page = await browser_manager.get_page()
-            
-            # Execute action based on type
+
+            # Flow optimization: try fragment reuse or URL shortcut before executing
+            remaining_as_dicts = [
+                {"action": s.action, "target": s.target or "", "value": getattr(s, "value", None)}
+                for s in steps[step_index:]
+            ]
+            if step_index == 0:
+                state["flow_start_url"] = page.url or ""
+
+            try:
+                opt = await self.optimizer.optimize(page, remaining_as_dicts)
+            except Exception as opt_err:
+                logger.debug("Optimizer check failed: %s", opt_err)
+                opt = None
+            if opt:
+                if opt["type"] == "fragment":
+                    await page.goto(opt["end_url"], wait_until="domcontentloaded")
+                    skip = opt["skip"]
+                    logger.info("[ORCHESTRATOR] Fragment reuse: goto %s, skip %d steps", opt["end_url"][:60], skip)
+                    return {
+                        **state,
+                        "results": [ActionResult(success=True)],
+                        "last_optimization_skip": skip,
+                    }
+                if opt["type"] == "shortcut":
+                    await page.goto(opt["url"], wait_until="domcontentloaded")
+                    skip = opt["skip"]
+                    logger.info("[ORCHESTRATOR] URL shortcut: goto %s, skip %d step(s)", opt["url"][:60], skip)
+                    return {
+                        **state,
+                        "results": [ActionResult(success=True)],
+                        "last_optimization_skip": skip,
+                    }
+
             if current_step.action == "NAVIGATE":
                 result = await self.executor.navigate(page, current_step.target)
                 
@@ -177,12 +268,27 @@ class AutomationOrchestrator:
                     current_step.target,
                     current_step.value
                 )
-                
-            elif current_step.action == "WAIT":
-                result = await self.executor.wait_for_element(
+            
+            elif current_step.action == "SELECT":
+                result = await self.executor.select_option(
                     page,
-                    current_step.target
+                    current_step.target,
+                    current_step.value
                 )
+            
+            elif current_step.action == "WAIT":
+                # "wait for 5 seconds" or value="5" -> sleep N seconds; else wait for element
+                wait_seconds = self._parse_wait_seconds(current_step)
+                if wait_seconds is not None:
+                    import asyncio
+                    logger.info("[ORCHESTRATOR] Step: EXECUTE %d/%d - WAIT %s seconds", step_index + 1, len(steps), wait_seconds)
+                    await asyncio.sleep(wait_seconds)
+                    result = ActionResult(success=True)
+                else:
+                    result = await self.executor.wait_for_element(
+                        page,
+                        current_step.target or ""
+                    )
             
             else:
                 result = ActionResult(
@@ -190,25 +296,24 @@ class AutomationOrchestrator:
                     error=f"Unknown action: {current_step.action}"
                 )
             
-            # Record result
-            state["results"].append(result)
-            
-            # Record state transition
+            # Return only the new result - LangGraph merges with operator.add so existing + [result]
             if result.success and result.after_state:
                 await state["state_manager"].record_state(
                     page,
                     action=current_step.action,
                     element_used=result.element.display_name if result.element else None
                 )
-            
-            logger.info(f"Step result: {'✓ SUCCESS' if result.success else '✗ FAILED'}")
+            if step_index == 0 and result.success and getattr(result, "after_state", None) and result.after_state.url:
+                state["flow_start_url"] = result.after_state.url
+
+            logger.info("[ORCHESTRATOR] Step: EXECUTE %d/%d - %s %s", step_index + 1, len(steps), "✓ SUCCESS" if result.success else "✗ FAILED", (" | " + result.error) if getattr(result, "error", None) else "")
+            return {**state, "results": [result]}
             
         except Exception as e:
-            logger.error(f"Execution error: {e}")
+            logger.error("[ORCHESTRATOR] Step: EXECUTE %d/%d - Exception: %s", step_index + 1, len(steps), e)
+            logger.error("Orchestrator traceback:\n%s", traceback.format_exc())
             result = ActionResult(success=False, error=str(e))
-            state["results"].append(result)
-        
-        return state
+            return {**state, "results": [result]}
     
     async def _validate_node(self, state: AutomationState) -> AutomationState:
         """Validate execution result."""
@@ -216,16 +321,16 @@ class AutomationOrchestrator:
         
         if not last_result:
             state["error"] = "No execution result to validate"
+            logger.error("[ORCHESTRATOR] Step: VALIDATE - No result to validate")
             return state
         
         if last_result.success:
-            # Success - move to next step
-            state["current_step_index"] += 1
-            state["recovery_attempts"] = 0  # Reset recovery counter
-            logger.info("✓ Step validated successfully")
+            skip = state.pop("last_optimization_skip", None)
+            state["current_step_index"] += (skip if skip is not None else 1)
+            state["recovery_attempts"] = 0
+            logger.info("[ORCHESTRATOR] Step: VALIDATE - ✓ Step OK, moving to next (index=%d)", state["current_step_index"])
         else:
-            # Failure - may need recovery
-            logger.warning(f"✗ Step failed: {last_result.error}")
+            logger.warning("[ORCHESTRATOR] Step: VALIDATE - ✗ Step failed: %s", getattr(last_result, "error", ""))
         
         return state
     
@@ -311,17 +416,17 @@ class AutomationOrchestrator:
     
     async def _cleanup_node(self, state: AutomationState) -> AutomationState:
         """Cleanup resources."""
-        logger.info("Cleaning up...")
+        logger.info("[ORCHESTRATOR] Step: CLEANUP - Closing browser...")
         
         try:
-            browser_manager = state["browser_manager"]
+            browser_manager = state.get("browser_manager")
             if browser_manager:
                 await browser_manager.close()
             
-            logger.info("✓ Cleanup complete")
+            logger.info("[ORCHESTRATOR] Step: CLEANUP - ✓ Done")
             
         except Exception as e:
-            logger.error(f"Cleanup error: {e}")
+            logger.error("[ORCHESTRATOR] Step: CLEANUP - Error: %s", e)
         
         return state
     
@@ -335,9 +440,9 @@ class AutomationOrchestrator:
         Returns:
             Execution result dictionary
         """
-        logger.info(f"Starting automation: {instruction}")
+        logger.info("[ORCHESTRATOR] run() started. Instruction (first 150 chars): %s", instruction[:150] + ("..." if len(instruction) > 150 else ""))
         
-        initial_state = {
+        initial_state: AutomationState = {
             "instruction": instruction,
             "steps": [],
             "current_step_index": 0,
@@ -346,26 +451,38 @@ class AutomationOrchestrator:
             "recovery_attempts": 0,
             "max_recovery_attempts": self.max_recovery_attempts,
             "browser_manager": None,
-            "state_manager": None
+            "state_manager": None,
+            "flow_start_url": None,
         }
         
         try:
             final_state = await self.graph.ainvoke(initial_state)
             
-            # Build result summary
+            steps_executed = final_state["current_step_index"]
+            total_steps = len(final_state["steps"])
+            step_results = final_state["results"]
+            # Success only when: no init/plan error AND all steps ran and all passed
+            all_passed = (
+                len(step_results) > 0
+                and all(getattr(r, "success", False) for r in step_results)
+                and steps_executed >= total_steps
+            )
+            has_error = bool(final_state.get("error"))
+            success = not has_error and (all_passed if total_steps > 0 else True)
+            
             results = {
-                "success": not final_state.get("error"),
-                "steps_executed": final_state["current_step_index"],
-                "total_steps": len(final_state["steps"]),
-                "results": [r.to_dict() for r in final_state["results"]],
-                "steps": final_state["steps"],  # Include steps for script generation
+                "success": success,
+                "steps_executed": steps_executed,
+                "total_steps": total_steps,
+                "results": [r.to_dict() for r in step_results],
+                "steps": final_state["steps"],
                 "error": final_state.get("error")
             }
             
             if results["success"]:
                 logger.info("✓ Automation completed successfully")
             else:
-                logger.error(f"✗ Automation failed: {results['error']}")
+                logger.error(f"✗ Automation failed: {results.get('error', 'steps failed')} (steps: {steps_executed}/{total_steps})")
             
             return results
             

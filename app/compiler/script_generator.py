@@ -1,7 +1,8 @@
 """
-Script Generator - Converts execution plans to Playwright JavaScript/TypeScript code
+Script Generator - Converts execution plans to Playwright JavaScript/TypeScript code.
+Accepts Instruction or ExecutionStep (action as string).
 """
-from typing import List, Literal
+from typing import List, Literal, Any
 from app.compiler.instruction_model import Instruction, ActionType
 
 
@@ -12,23 +13,46 @@ class ScriptGenerator:
         self.language = language
         self.use_types = language == "typescript"
     
+    def _normalize_instruction(self, step: Any) -> Instruction:
+        """Convert ExecutionStep (action=str) or dict to Instruction (action=ActionType). Never use .get on non-dict."""
+        if isinstance(step, Instruction) and hasattr(step.action, "value"):
+            return step
+        if isinstance(step, dict):
+            action = step.get("action")
+            target = step.get("target", "") or ""
+            value = step.get("value")
+        else:
+            action = getattr(step, "action", None)
+            target = getattr(step, "target", "") or ""
+            value = getattr(step, "value", None)
+        if isinstance(action, str):
+            try:
+                action = ActionType[action.upper()]
+            except (KeyError, ValueError):
+                try:
+                    action = ActionType(action.lower())
+                except (KeyError, ValueError):
+                    action = ActionType.CLICK if action.lower() in ("click", "press") else ActionType.ASSERT
+        return Instruction(action=action, target=target, value=value)
+    
     def generate_script(
         self, 
-        instructions: List[Instruction], 
+        instructions: List[Any], 
         test_name: str = "automatedTest"
     ) -> str:
         """
-        Generate a complete Playwright test script
+        Generate a complete Playwright test script.
         
         Args:
-            instructions: List of instructions to convert
+            instructions: List of Instruction, ExecutionStep, or dict
             test_name: Name for the test function
             
         Returns:
             Complete Playwright script as string
         """
+        normalized = [self._normalize_instruction(s) for s in instructions]
         imports = self._generate_imports()
-        test_function = self._generate_test_function(instructions, test_name)
+        test_function = self._generate_test_function(normalized, test_name)
         
         return f"{imports}\n\n{test_function}\n"
     
@@ -89,7 +113,7 @@ class ScriptGenerator:
             wait_time = int(instruction.value or 2) * 1000
             return [f"await page.waitForTimeout({wait_time});"]
         
-        elif action == ActionType.VERIFY:
+        elif action == ActionType.ASSERT:
             return self._generate_verify_code(instruction)
         
         elif action == ActionType.SELECT:
@@ -178,7 +202,7 @@ class ScriptGenerator:
     def _generate_verify_code(self, instruction: Instruction) -> List[str]:
         """Generate verification code"""
         target = instruction.target
-        expected = instruction.expected or instruction.value
+        expected = getattr(instruction, "expected_outcome", None) or getattr(instruction, "expected", None) or instruction.value
         
         lines = []
         
