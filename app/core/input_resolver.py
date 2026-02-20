@@ -3,7 +3,7 @@ Strict input resolver for TYPE actions.
 Deterministic: no threshold guesswork; single input => use it; else match by placeholder/aria.
 """
 from playwright.async_api import Page
-from typing import Optional
+from typing import Optional, Any
 import logging
 
 logger = logging.getLogger(__name__)

@@ -9,7 +9,11 @@ pydantic-settings>=2.1.0
 # AI and LangGraph
 openai>=1.32.0
 langgraph>=0.2.0
-langchain-core>=0.2.0
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langchain-openai>=0.2.0
+langsmith>=0.2.0
 
 # Optional: Mem0 for semantic memory
 # mem0ai==0.0.11

@@ -77,7 +77,7 @@ with tab1:
     col1, col2 = st.columns([1, 4])
     
     with col1:
-        execute_btn = st.button("▶️ Execute", type="primary", width="stretch")
+        execute_btn = st.button("▶️ Execute", type="primary", use_container_width=True)
     
     # Execute
     if execute_btn:
