@@ -2,6 +2,7 @@
 Action Executor V3 - SAM-V3 hybrid engine.
 Uses SmartLocatorV3 (DOM + optional Vision + Semantic) for all actions.
 Integrates flow_handlers for delivery, checkboxes, search.
+OPTIMIZED: Smart overlay handling and behavioral simulation.
 """
 from playwright.async_api import Page
 from typing import Optional
@@ -12,6 +13,13 @@ from app.locator_engine_v3.action_resolver_v3 import ActionResolverV3
 from app.core.outcome_validator import OutcomeValidator
 from app.core.action_executor import ActionResult
 from app.core.flow_handlers import select_delivery, click_all_checkboxes
+from app.core.smart_interaction_utils import (
+    smart_click_with_overlay_handling,
+    smart_wait_for_element,
+    behavioral_hover,
+    safe_type_with_focus,
+    force_click_with_js
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +49,11 @@ class ActionExecutorV3:
         try:
             await page.goto(url or "", wait_until="domcontentloaded")
             await page.wait_for_timeout(500)
+            
+            # Clear DOM cache after navigation (new page = new DOM)
+            if hasattr(self.resolver.locator, 'dom') and hasattr(self.resolver.locator.dom, 'clear_cache'):
+                self.resolver.locator.dom.clear_cache()
+            
             after = await self.validator.capture_state(page)
             if self.validator.validate_navigation(before, after):
                 return ActionResult(success=True, before_state=before, after_state=after)
@@ -69,13 +82,29 @@ class ActionExecutorV3:
         locator = await self.resolver.resolve_click(page, target)
         if not locator:
             return ActionResult(success=False, error=f"Unable to locate: {target}", before_state=before)
+        
+        # Use smart click with overlay handling
         try:
-            await locator.click(timeout=5000)
-            await asyncio.sleep(wait_after)
-            after = await self.validator.capture_state(page)
-            if self.validator.validate_transition(before, after):
-                return ActionResult(success=True, before_state=before, after_state=after)
-            return ActionResult(success=True, before_state=before, after_state=after)  # lenient
+            # Try behavioral hover first (expands dropdowns, shows tooltips)
+            await behavioral_hover(page, locator)
+            
+            # Smart click with automatic overlay dismissal and retries
+            success = await smart_click_with_overlay_handling(page, locator, max_retries=3)
+            
+            if not success:
+                # Fallback to JS click
+                logger.info("[EXECUTOR_V3] Fallback to JS click")
+                success = await force_click_with_js(page, locator)
+            
+            if success:
+                await asyncio.sleep(wait_after)
+                after = await self.validator.capture_state(page)
+                if self.validator.validate_transition(before, after):
+                    return ActionResult(success=True, before_state=before, after_state=after)
+                return ActionResult(success=True, before_state=before, after_state=after)  # lenient
+            else:
+                return ActionResult(success=False, error=f"Click failed after retries", before_state=before)
+                
         except Exception as e:
             return ActionResult(success=False, error=str(e), before_state=before)
 
@@ -110,14 +139,15 @@ class ActionExecutorV3:
         locator = await self.resolver.resolve_input(page, target_field or "")
         if not locator:
             return ActionResult(success=False, error=f"Unable to locate input: {target_field}", before_state=before)
-        try:
-            if clear_first:
-                await locator.clear()
-            await locator.fill(text_to_type or "")
+        
+        # Use safe typing with focus
+        success = await safe_type_with_focus(page, locator, text_to_type or "", clear_first=clear_first)
+        
+        if success:
             after = await self.validator.capture_state(page)
             return ActionResult(success=True, before_state=before, after_state=after)
-        except Exception as e:
-            return ActionResult(success=False, error=str(e), before_state=before)
+        else:
+            return ActionResult(success=False, error="Type operation failed", before_state=before)
 
     async def select_option(
         self,
@@ -145,13 +175,13 @@ class ActionExecutorV3:
         except Exception as e:
             return ActionResult(success=False, error=str(e), before_state=before)
 
-    async def wait_for_element(self, page: Page, target_text: str, timeout: float = 10.0) -> ActionResult:
-        """Wait for element to appear."""
+    async def wait_for_element(self, page: Page, target_text: str, timeout: float = 30.0) -> ActionResult:
+        """Wait for element to appear with smart overlay handling."""
         logger.info("[EXECUTOR_V3] WAIT for: '%s'", (target_text or "")[:50])
-        start = asyncio.get_event_loop().time()
-        while asyncio.get_event_loop().time() - start < timeout:
-            locator = await self.resolver.resolve_click(page, target_text or "")
-            if locator:
-                return ActionResult(success=True)
-            await asyncio.sleep(0.5)
+        
+        # Use smart wait with overlay dismissal
+        locator = await smart_wait_for_element(page, target_text or "", timeout=int(timeout * 1000))
+        
+        if locator:
+            return ActionResult(success=True)
         return ActionResult(success=False, error=f"Timeout waiting for '{target_text}'")

@@ -110,8 +110,21 @@ class ScriptGenerator:
             return self._generate_type_code(instruction)
         
         elif action == ActionType.WAIT:
-            wait_time = int(instruction.value or 2) * 1000
-            return [f"await page.waitForTimeout({wait_time});"]
+            # Handle WAIT for element or WAIT for time
+            if instruction.value and instruction.value.replace('.', '').isdigit():
+                # Wait for time (seconds)
+                wait_time = int(float(instruction.value)) * 1000
+                return [f"await page.waitForTimeout({wait_time});"]
+            elif instruction.target:
+                # Wait for element
+                target_text = instruction.target.replace("'", "\\'")
+                return [
+                    f"// Wait for element: '{target_text}'",
+                    f"await page.getByText('{target_text}').waitFor({{ timeout: 30000 }});"
+                ]
+            else:
+                # Default wait 2 seconds
+                return [f"await page.waitForTimeout(2000);"]
         
         elif action == ActionType.ASSERT:
             return self._generate_verify_code(instruction)

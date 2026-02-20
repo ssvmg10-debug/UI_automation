@@ -1,13 +1,17 @@
 """
 Planner Agent - converts natural language to structured execution plans.
 Does NOT execute - only plans.
+OPTIMIZED: Fragment reuse for faster planning.
 """
 from openai import AsyncAzureOpenAI
 from typing import List, Dict, Any, Optional
 import json
 import logging
+import hashlib
+from difflib import SequenceMatcher
 
 from app.config import settings
+from app.flow_optimization.fragment_store import FragmentStore
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,7 @@ class PlannerAgent:
     """
     AI agent that converts natural language instructions to structured plans.
     This agent does NOT execute actions - it only plans.
+    OPTIMIZED: Checks fragment cache before generating new plans.
     """
     
     def __init__(self, api_key: Optional[str] = None):
@@ -61,6 +66,80 @@ class PlannerAgent:
             azure_endpoint=settings.AZURE_ENDPOINT
         )
         self.model = settings.AZURE_DEPLOYMENT
+        self.fragment_store = FragmentStore()
+        self._plan_cache: Dict[str, List[ExecutionStep]] = {}
+    
+    def _get_instruction_hash(self, instruction_text: str) -> str:
+        """Generate hash for instruction caching."""
+        normalized = instruction_text.lower().strip()
+        return hashlib.md5(normalized.encode('utf-8')).hexdigest()
+    
+    def _similarity_ratio(self, a: str, b: str) -> float:
+        """Calculate similarity between two strings."""
+        return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
+    
+    async def _check_fragment_cache(self, instruction_text: str) -> Optional[List[ExecutionStep]]:
+        """
+        Check if we have a cached fragment for similar instructions.
+        Returns cached steps if found, None otherwise.
+        """
+        try:
+            rows = self.fragment_store.fetch_all()
+            
+            best_match_score = 0.0
+            best_match_steps = None
+            
+            for row in rows:
+                fragment_id, site, start_url, end_url, steps_json, success_count = row
+                steps = json.loads(steps_json)
+                
+                # Reconstruct instruction from steps
+                fragment_instruction = self._steps_to_instruction(steps)
+                similarity = self._similarity_ratio(instruction_text, fragment_instruction)
+                
+                # If similarity > 85%, reuse this fragment
+                if similarity > 0.85 and similarity > best_match_score:
+                    best_match_score = similarity
+                    best_match_steps = steps
+            
+            if best_match_steps and best_match_score > 0.85:
+                logger.info(f"[PLANNER] Found cached fragment with {best_match_score:.1%} similarity - reusing {len(best_match_steps)} steps")
+                
+                # Convert dict steps to ExecutionStep objects
+                execution_steps = []
+                for step_dict in best_match_steps:
+                    execution_steps.append(ExecutionStep(
+                        action=step_dict.get("action", ""),
+                        target=step_dict.get("target", ""),
+                        value=step_dict.get("value"),
+                        region=step_dict.get("region")
+                    ))
+                return execution_steps
+        except Exception as e:
+            logger.debug(f"Fragment cache check failed: {e}")
+        
+        return None
+    
+    def _steps_to_instruction(self, steps: List[Dict[str, Any]]) -> str:
+        """Convert steps back to instruction text for similarity matching."""
+        instruction_parts = []
+        for step in steps:
+            action = step.get("action", "").lower()
+            target = step.get("target", "")
+            value = step.get("value")
+            
+            if action == "navigate":
+                instruction_parts.append(f"navigate to {target}")
+            elif action == "click":
+                instruction_parts.append(f"click {target}")
+            elif action == "type":
+                instruction_parts.append(f"type {value} in {target}")
+            elif action == "select":
+                instruction_parts.append(f"select {value} from {target}")
+            elif action == "wait":
+                instruction_parts.append(f"wait for {target}")
+        
+        return " ".join(instruction_parts)
     
     async def plan(self, instruction_text: str) -> List[ExecutionStep]:
         """
@@ -74,6 +153,19 @@ class PlannerAgent:
         """
         logger.info("Planning execution from natural language instruction")
         
+        # Check cache first
+        instruction_hash = self._get_instruction_hash(instruction_text)
+        if instruction_hash in self._plan_cache:
+            logger.info("[PLANNER] Using cached plan (%d steps)", len(self._plan_cache[instruction_hash]))
+            return self._plan_cache[instruction_hash]
+        
+        # Check fragment store for similar instructions
+        cached_steps = await self._check_fragment_cache(instruction_text)
+        if cached_steps:
+            self._plan_cache[instruction_hash] = cached_steps
+            return cached_steps
+        
+        # Generate new plan
         prompt = self._build_planning_prompt(instruction_text)
         
         try:
@@ -101,6 +193,9 @@ class PlannerAgent:
             logger.info(f"Generated plan with {len(steps)} steps")
             for i, step in enumerate(steps, 1):
                 logger.info(f"  Step {i}: {step}")
+            
+            # Cache the plan
+            self._plan_cache[instruction_hash] = steps
             
             return steps
             
