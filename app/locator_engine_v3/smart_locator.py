@@ -2,6 +2,7 @@
 Smart Locator V3 - Main API for element resolution.
 DOM + optional Vision + Semantic fusion → Rank → Self-heal.
 """
+import re
 from playwright.async_api import Page
 from typing import Optional, Any
 import logging
@@ -30,22 +31,36 @@ class SmartLocatorV3:
     async def locate_click(self, page: Page, target: str):
         """Locate element for CLICK action."""
         dom_data = await self.dom.scan_clickables(page)
-        if not dom_data:
-            return None
+        if dom_data:
+            vision_data = None
+            if self.vision.available:
+                vision_data = await self.vision.scan(page)
+            target_emb = self.encoder.embed(target or "")
+            fused = self.fusion.fuse(target, dom_data, vision_data, target_emb, self.encoder)
+            best_locator = self.ranker.pick_best(fused)
+            if best_locator:
+                return best_locator
 
-        vision_data = None
-        if self.vision.available:
-            vision_data = await self.vision.scan(page)
+        # Checkout-specific fallback: LG/e-commerce often use link with href containing "checkout"
+        t = (target or "").strip().lower()
+        if t == "checkout":
+            for name, get_loc in [
+                ("href", lambda: page.locator('a[href*="checkout"]').first),
+                ("link", lambda: page.get_by_role("link", name=re.compile(r"checkout", re.I)).first),
+                ("button", lambda: page.get_by_role("button", name=re.compile(r"checkout", re.I)).first),
+            ]:
+                try:
+                    loc = get_loc()
+                    if loc and await loc.is_visible():
+                        logger.info("[SMART_LOCATOR] Checkout fallback: %s", name)
+                        return loc
+                except Exception:
+                    pass
 
-        target_emb = self.encoder.embed(target or "")
-        fused = self.fusion.fuse(target, dom_data, vision_data, target_emb, self.encoder)
-
-        best_locator = self.ranker.pick_best(fused)
-        if best_locator:
-            return best_locator
-
-        healed = await self.heal.heal(page, target, fused)
-        return healed
+        if dom_data:
+            healed = await self.heal.heal(page, target, fused)
+            return healed
+        return None
 
     async def locate_input(self, page: Page, target: str):
         """Locate element for TYPE action (input/textarea).

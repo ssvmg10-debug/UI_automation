@@ -255,8 +255,15 @@ class AutomationOrchestratorV3:
             strategies = await self.recovery_agent.suggest_recovery(
                 step.action, step.target or "", last.error or "", texts, {"url": page.url}
             )
-            if strategies and strategies[0].alternative_target:
-                step.target = strategies[0].alternative_target
+            # Don't replace "checkout" with unrelated alternatives (e.g. "Shop Now", "Preorder Now")
+            original_target = (step.target or "").strip().lower()
+            alt = (strategies[0].alternative_target or "").strip() if strategies else ""
+            bad_checkout_alternatives = ("shop now", "preorder now")
+            if strategies and alt:
+                if original_target == "checkout" and any(b in alt.lower() for b in bad_checkout_alternatives):
+                    logger.info("[ORCH_V3] Rejecting recovery alternative '%s' for checkout", alt[:50])
+                else:
+                    step.target = strategies[0].alternative_target
             if strategies and strategies[0].wait_time:
                 import asyncio
                 await asyncio.sleep(strategies[0].wait_time)
