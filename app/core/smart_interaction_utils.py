@@ -2,6 +2,7 @@
 Smart Interaction Utilities - Advanced interaction patterns for reliability.
 Includes overlay detection, behavioral simulation (hover, scroll), and smart waiting.
 """
+import re
 from playwright.async_api import Page, Locator
 from typing import Optional
 import asyncio
@@ -100,7 +101,7 @@ async def smart_click_with_overlay_handling(
             await asyncio.sleep(0.2)
             
             # Try click
-            await locator.click(timeout=5000)
+            await locator.click(timeout=15000)  # 15s for slow enterprise pages
             logger.info(f"✓ Click succeeded on attempt {attempt + 1}")
             return True
             
@@ -176,23 +177,47 @@ async def behavioral_scroll_to_element(page: Page, locator: Locator, offset: int
 async def smart_wait_for_element(
     page: Page, 
     target: str, 
-    timeout: int = 30000,
+    timeout: int = 60000,  # 60s - enterprise pages can load slowly
     check_interval: int = 1000
 ) -> Optional[Locator]:
     """
     Wait for element with periodic overlay dismissal.
+    Uses multiple strategies: text, label, role, and scroll to find elements.
     Returns locator if found, None otherwise.
     """
-    start_time = asyncio.get_event_loop().time()
+    try:
+        start_time = asyncio.get_running_loop().time()
+    except RuntimeError:
+        start_time = __import__("time").monotonic()
     max_time = start_time + (timeout / 1000)
     
     logger.info(f"[SMART_WAIT] Waiting for element: '{target}' (timeout={timeout}ms)")
     
-    # Build flexible selector
-    selector = f"text=/{target}/i"
+    # Strategies: text, label, role, heading - order matters
+    target_re = re.compile(re.escape(target), re.I) if target else None
+
+    def _try_strategies():
+        strategies = []
+        if not target:
+            return strategies
+        # 1. Text contains - handles "1 Contact Information", "Contact Information"
+        strategies.append(("text", lambda: page.get_by_text(target, exact=False).first))
+        # 2. Label - for form sections/inputs
+        strategies.append(("label", lambda: page.get_by_label(target, exact=False).first))
+        # 3. Role heading - for section headings (regex for partial match)
+        if target_re:
+            strategies.append(("heading", lambda: page.get_by_role("heading", name=target_re).first))
+            strategies.append(("region", lambda: page.get_by_role("region", name=target_re).first))
+        return strategies
     
     checks = 0
-    while asyncio.get_event_loop().time() < max_time:
+    last_scroll_y = 0
+    def _now():
+        try:
+            return asyncio.get_running_loop().time()
+        except RuntimeError:
+            return __import__("time").monotonic()
+    while _now() < max_time:
         checks += 1
         
         try:
@@ -200,11 +225,33 @@ async def smart_wait_for_element(
             if checks % 3 == 0:
                 await detect_and_dismiss_overlays(page)
             
-            # Try to locate element
-            locator = page.locator(selector).first
-            if await locator.is_visible():
-                logger.info(f"✓ Element found after {checks} checks")
-                return locator
+            # Try each strategy
+            for name, get_locator in _try_strategies():
+                try:
+                    locator = get_locator()
+                    if locator and await locator.is_visible():
+                        logger.info(f"✓ Element found after {checks} checks (strategy: {name})")
+                        return locator
+                except Exception:
+                    pass
+            
+            # Scroll periodically to expose lazy-loaded content (e.g. checkout form)
+            if checks % 5 == 0 and checks > 1:
+                try:
+                    scroll_y = await page.evaluate("window.scrollY")
+                    doc_height = await page.evaluate("document.body.scrollHeight")
+                    view_height = await page.evaluate("window.innerHeight")
+                    # Scroll down in chunks
+                    next_y = min(scroll_y + view_height * 0.6, doc_height - view_height)
+                    if next_y > last_scroll_y and next_y < doc_height:
+                        await page.evaluate(f"window.scrollTo(0, {next_y})")
+                        last_scroll_y = next_y
+                        await asyncio.sleep(0.3)
+                    elif scroll_y < 100:
+                        await page.evaluate("window.scrollTo(0, 0)")
+                        last_scroll_y = 0
+                except Exception:
+                    pass
             
         except Exception:
             pass

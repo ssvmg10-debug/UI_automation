@@ -14,12 +14,23 @@ if (-not (Test-Path ".env")) {
     exit 1
 }
 
-# Check if port 8000 is already in use (e.g. previous backend still running)
-$port8000 = netstat -ano | findstr "LISTENING" | findstr ":8000 "
-if ($port8000) {
-    $pidLine = $port8000.Trim() -split "\s+"
+# Load .env into process env (for API_PORT etc.)
+Get-Content .env | ForEach-Object {
+    if ($_ -match '^\s*([^#][^=]+)=(.*)$') {
+        $key = $matches[1].Trim()
+        $val = $matches[2].Trim()
+        [Environment]::SetEnvironmentVariable($key, $val, 'Process')
+    }
+}
+
+$apiPort = if ($env:API_PORT) { $env:API_PORT } else { "8000" }
+
+# Check if port is already in use (e.g. previous backend still running)
+$portInUse = netstat -ano | findstr "LISTENING" | findstr ":$apiPort "
+if ($portInUse) {
+    $pidLine = $portInUse.Trim() -split "\s+"
     $pidOnPort = $pidLine[-1]
-    Write-Host "Port 8000 is in use by process $pidOnPort (likely a previous backend)." -ForegroundColor Yellow
+    Write-Host "Port $apiPort is in use by process $pidOnPort (likely a previous backend)." -ForegroundColor Yellow
     Write-Host "Stopping that process so this backend can start..." -ForegroundColor Yellow
     Get-Process -Id $pidOnPort -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Seconds 1
@@ -27,7 +38,7 @@ if ($port8000) {
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  Backend API (logs in this window + log files)" -ForegroundColor Cyan
-Write-Host "  API: http://localhost:8000" -ForegroundColor White
+Write-Host "  API: http://localhost:$apiPort (set API_PORT in .env)" -ForegroundColor White
 Write-Host "  Start UI in another terminal: .\run-ui.ps1" -ForegroundColor Yellow
 Write-Host "  Log files: logs\uvicorn.log, logs\backend.log, logs\automation.log" -ForegroundColor Gray
 Write-Host "  To enable auto-reload: `$env:RELOAD='1'; .\run-backend.ps1" -ForegroundColor Gray

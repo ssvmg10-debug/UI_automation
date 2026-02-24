@@ -1,5 +1,5 @@
 # Run UI only - ensure backend is already running in another terminal (run-backend.ps1)
-# API must be at http://localhost:8000
+# API URL from .env: API_HOST, API_PORT (default localhost:8000)
 
 $ProjectRoot = $PSScriptRoot
 Set-Location $ProjectRoot

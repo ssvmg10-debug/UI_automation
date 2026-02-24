@@ -48,17 +48,34 @@ class SmartLocatorV3:
         return healed
 
     async def locate_input(self, page: Page, target: str):
-        """Locate element for TYPE action (input/textarea)."""
+        """Locate element for TYPE action (input/textarea).
+        Uses DOM+Vision fusion first, then Playwright label/placeholder fallback for
+        enterprise forms (e.g. checkout Email, Phone Number)."""
         dom_data = await self.dom.scan_inputs(page)
-        if not dom_data:
-            return None
 
-        vision_data = None
-        if self.vision.available:
-            vision_data = await self.vision.scan(page)
+        if dom_data:
+            vision_data = None
+            if self.vision.available:
+                vision_data = await self.vision.scan(page)
+            target_emb = self.encoder.embed(target or "")
+            fused = self.fusion.fuse(target, dom_data, vision_data, target_emb, self.encoder)
+            best_locator = self.ranker.pick_best(fused, threshold=0.30)
+            if best_locator:
+                return best_locator
 
-        target_emb = self.encoder.embed(target or "")
-        fused = self.fusion.fuse(target, dom_data, vision_data, target_emb, self.encoder)
-
-        best_locator = self.ranker.pick_best(fused, threshold=0.30)
-        return best_locator
+        # Fallback: Playwright getByLabel/getByPlaceholder (enterprise forms, checkout pages)
+        if target and target.strip():
+            t = target.strip()
+            for name, get_loc in [
+                ("label", lambda: page.get_by_label(t, exact=False).first),
+                ("placeholder", lambda: page.get_by_placeholder(t, exact=False).first),
+                ("role", lambda: page.get_by_role("textbox", name=t).first),
+            ]:
+                try:
+                    loc = get_loc()
+                    if loc and await loc.is_visible():
+                        logger.debug("[SMART_LOCATOR] Input fallback: %s matched '%s'", name, t[:30])
+                        return loc
+                except Exception:
+                    pass
+        return None

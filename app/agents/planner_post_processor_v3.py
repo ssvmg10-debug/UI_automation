@@ -2,6 +2,7 @@
 Planner Post-Processor V3 - Target normalization, synonyms, flow hints.
 Runs after planner.plan() to improve locator matching.
 """
+import re
 from typing import List
 from app.agents.planner_agent import ExecutionStep
 import logging
@@ -9,6 +10,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Target normalization: planner output -> DOM-friendly text
+# IMPORTANT: Longer/specific phrases first. Use whole-word matching for short keys
+# like "check" to avoid "checkout" -> "check" (check must not match checkout).
 SYNONYMS = {
     "search option": "search",
     "search": "search",
@@ -19,6 +22,9 @@ SYNONYMS = {
     "all water purifiers": "all water purifiers",
     "split air conditioners": "split air conditioners",
     "air solutions": "air solutions",
+    "checkout": "checkout",
+    "check out": "checkout",
+    "proceed to checkout": "checkout",
     "check beside pincode": "check",
     "check": "check",
     "free delivery": "free delivery",
@@ -32,14 +38,23 @@ SYNONYMS = {
 
 
 def normalize_target(target: str) -> str:
-    """Map planner target to DOM-friendly text."""
+    """Map planner target to DOM-friendly text.
+    Longer phrases matched first; short keys like 'check' use whole-word match
+    to avoid 'checkout' -> 'check'."""
     if not target:
         return target
     t = target.strip()
     lower = t.lower()
     for k, v in SYNONYMS.items():
-        if k in lower or lower == k:
+        if lower == k:
             return v
+        if k in lower:
+            # Whole-word match for short keys: "check" must not match "checkout"
+            if len(k) <= 5:
+                if re.search(r'\b' + re.escape(k) + r'\b', lower):
+                    return v
+            else:
+                return v
     return t
 
 

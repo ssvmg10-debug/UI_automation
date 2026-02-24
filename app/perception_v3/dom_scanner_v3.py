@@ -31,14 +31,17 @@ class DOMScannerV3:
     INPUT_SELECTOR = "input, textarea, select"
 
     async def _compute_dom_hash(self, page: Page) -> str:
-        """Fast hash of visible DOM structure."""
+        """Fast hash of visible DOM structure. Uses same element types as CLICKABLE_SELECTOR."""
         try:
-            dom_signature = await page.evaluate("""() => {
-                const clickables = document.querySelectorAll('a:not([style*="display:none"]):not([style*="display: none"]), button:not([style*="display:none"]):not([style*="display: none"])');
-                return Array.from(clickables).slice(0, 100).map(el => 
-                    el.tagName + (el.textContent || '').slice(0, 20) + el.getBoundingClientRect().top
-                ).join('|');
-            }""")
+            selector = "a, button, [role='button'], [role='link'], div[onclick], span[onclick], input[type='submit'], input[type='button']"
+            dom_signature = await page.evaluate("""(sel) => {
+                const clickables = document.querySelectorAll(sel);
+                return Array.from(clickables).slice(0, 150).map(el => {
+                    const r = el.getBoundingClientRect();
+                    if (r.width === 0 || r.height === 0) return '';
+                    return el.tagName + (el.textContent || '').slice(0, 20) + r.top;
+                }).filter(Boolean).join('|');
+            }""", selector)
             return hashlib.md5(dom_signature.encode('utf-8')).hexdigest()
         except Exception:
             return ""
@@ -113,7 +116,8 @@ class DOMScannerV3:
         return results
 
     async def scan_inputs(self, page: Page, force_refresh: bool = False) -> List[Dict[str, Any]]:
-        """Extract visible input elements with caching."""
+        """Extract visible input elements with caching.
+        Includes placeholder, aria-label, name, and associated label text for enterprise forms."""
         # Check cache for inputs
         if not force_refresh:
             current_hash = await self._compute_dom_hash(page)
@@ -136,7 +140,15 @@ class DOMScannerV3:
                     placeholder = await el.get_attribute("placeholder") or ""
                     aria_label = await el.get_attribute("aria-label") or ""
                     name = await el.get_attribute("name") or ""
-                    combined = f"{text} {placeholder} {aria_label} {name}".strip()
+                    input_id = await el.get_attribute("id") or ""
+                    label_text = ""
+                    if input_id:
+                        try:
+                            label_loc = page.locator(f'label[for="{input_id}"]').first
+                            label_text = (await label_loc.inner_text(timeout=200)).strip()
+                        except Exception:
+                            pass
+                    combined = f"{text} {placeholder} {aria_label} {name} {label_text}".strip()
                     bbox = await el.bounding_box()
                     if bbox:
                         results.append({
@@ -168,4 +180,3 @@ class DOMScannerV3:
             "clickables_cached": len(self._cached_clickables),
             "inputs_cached": len(self._cached_inputs)
         }
-        return results

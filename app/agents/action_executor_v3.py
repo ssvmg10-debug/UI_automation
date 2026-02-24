@@ -99,6 +99,10 @@ class ActionExecutorV3:
             if success:
                 await asyncio.sleep(wait_after)
                 after = await self.validator.capture_state(page)
+                # Clear DOM cache on navigation (new page = fresh scan for inputs/clickables)
+                if before and after and getattr(before, "url", None) != getattr(after, "url", None):
+                    if hasattr(self.resolver.locator, "dom") and hasattr(self.resolver.locator.dom, "clear_cache"):
+                        self.resolver.locator.dom.clear_cache()
                 if self.validator.validate_transition(before, after):
                     return ActionResult(success=True, before_state=before, after_state=after)
                 return ActionResult(success=True, before_state=before, after_state=after)  # lenient
@@ -124,13 +128,13 @@ class ActionExecutorV3:
             try:
                 search_btn = await self.resolver.resolve_click(page, "search")
                 if search_btn:
-                    await search_btn.click(timeout=3000)
-                    await asyncio.sleep(1000 / 1000)  # 1s
+                    await search_btn.click(timeout=10000)
+                    await asyncio.sleep(1)
                 inp = await self.resolver.resolve_input(page, "search")
                 if inp:
                     await inp.fill(text_to_type or "")
                     await inp.press("Enter")
-                    await asyncio.sleep(500 / 1000)
+                    await asyncio.sleep(0.5)
                     after = await self.validator.capture_state(page)
                     return ActionResult(success=True, before_state=before, after_state=after)
             except Exception as e:
@@ -168,14 +172,14 @@ class ActionExecutorV3:
         if not locator:
             return ActionResult(success=False, error=f"Unable to locate: {target}", before_state=before)
         try:
-            await locator.click(timeout=5000)
+            await locator.click(timeout=15000)  # 15s for slow enterprise pages
             await asyncio.sleep(0.3)
             after = await self.validator.capture_state(page)
             return ActionResult(success=True, before_state=before, after_state=after)
         except Exception as e:
             return ActionResult(success=False, error=str(e), before_state=before)
 
-    async def wait_for_element(self, page: Page, target_text: str, timeout: float = 30.0) -> ActionResult:
+    async def wait_for_element(self, page: Page, target_text: str, timeout: float = 60.0) -> ActionResult:
         """Wait for element to appear with smart overlay handling."""
         logger.info("[EXECUTOR_V3] WAIT for: '%s'", (target_text or "")[:50])
         

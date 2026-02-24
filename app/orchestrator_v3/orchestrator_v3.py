@@ -99,7 +99,7 @@ class AutomationOrchestratorV3:
     async def _initialize_node(self, state: AutomationState) -> AutomationState:
         logger.info("[ORCH_V3] INITIALIZE (headed=%s)", not self.headless)
         try:
-            timeout = 60000
+            timeout = getattr(settings, "BROWSER_TIMEOUT", 90000)  # 90s default for enterprise
             bm = BrowserManager(headless=self.headless, timeout=timeout)
             await bm.start()
             state["browser_manager"] = bm
@@ -325,4 +325,11 @@ class AutomationOrchestratorV3:
             }
         except Exception as e:
             logger.error("[ORCH_V3] Error: %s", e)
-            return {"success": False, "error": str(e), "steps_executed": 0, "total_steps": 0, "results": []}
+            return {
+                "success": False,
+                "error": str(e),
+                "steps_executed": 0,
+                "total_steps": 0,
+                "results": [],
+                "steps": [],  # Allow API to fallback to planner for script generation
+            }

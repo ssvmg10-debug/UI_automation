@@ -1,11 +1,20 @@
 """
 Streamlit UI for Enterprise UI Automation Platform.
 """
+import os
 import streamlit as st
 import requests
+import requests.exceptions
 import json
 from datetime import datetime
 import pandas as pd
+
+# Load .env so API_HOST, API_PORT, API_BASE_URL are available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # Page config
 st.set_page_config(
@@ -14,8 +23,13 @@ st.set_page_config(
     layout="wide"
 )
 
-# API endpoint
-API_BASE_URL = "http://localhost:8001"
+# API endpoint - from env or API_HOST:API_PORT (matches backend config)
+API_BASE_URL = os.environ.get("API_BASE_URL") or (
+    f"http://{os.environ.get('API_HOST', 'localhost')}:{os.environ.get('API_PORT', '8000')}"
+)
+
+# Execution timeout (seconds) - keep high so long enterprise tests complete and UI gets response/script
+EXECUTE_TIMEOUT = int(os.environ.get("EXECUTE_TIMEOUT", "7200"))  # 2h default; set EXECUTE_TIMEOUT in .env to override
 
 # Title and description
 st.title("🤖 Enterprise UI Automation Platform")
@@ -50,12 +64,13 @@ with st.sidebar:
     
     # Health check
     try:
-        health = requests.get(f"{API_BASE_URL}/health").json()
+        health = requests.get(f"{API_BASE_URL}/health", timeout=5).json()
         st.success("✓ System Healthy")
-        st.metric("Total Executions", health["timestamp"]["total_executions"])
-        if health["timestamp"]["total_executions"] > 0:
-            st.metric("Success Rate", f"{health['timestamp']['success_rate']:.1f}%")
-    except:
+        summary = health.get("timestamp") or health.get("metrics") or {}
+        st.metric("Total Executions", summary.get("total_executions", 0))
+        if summary.get("total_executions", 0) > 0:
+            st.metric("Success Rate", f"{summary.get('success_rate', 0):.1f}%")
+    except (requests.exceptions.RequestException, KeyError) as e:
         st.error("✗ API Unreachable")
     
     st.caption("Backend logs: logs\\backend.log, logs\\uvicorn.log")
@@ -96,7 +111,7 @@ with tab1:
                             "script_language": script_language,
                             "use_v3": use_v3
                         },
-                        timeout=300  # 5 minutes
+                        timeout=EXECUTE_TIMEOUT
                     )
                     
                     result = response.json()
@@ -116,7 +131,7 @@ with tab1:
                     
                     # Display result banner
                     if result["success"] and steps_total > 0 and steps_ok == steps_total:
-                        st.success(f"✅ Test Passed! 100% success ({steps_ok}/{steps_total} steps) – Headed mode execution completed.")
+                        st.success(f"✅ Test Passed! 100% success ({steps_ok}/{steps_total} steps) - Headed mode execution completed.")
                     elif result["success"] and steps_total == 0:
                         st.info("No steps to run.")
                     else:
@@ -124,18 +139,18 @@ with tab1:
                         st.error(f"❌ Test Failed: {err_msg}")
                         st.caption(f"Steps completed: {steps_ok}/{steps_total}")
                     
-                    # Test script used for this run (report)
+                    # Test script used to execute these steps (TypeScript or JavaScript per user selection)
                     if result.get("generated_script"):
                         st.divider()
-                        st.subheader("📝 Test script used for UI automation (download or copy)")
-                        
                         script_lang = result.get("script_language", "typescript")
                         file_ext = result.get("file_extension", ".ts")
                         test_file = f"test{file_ext}"
-                        
+                        st.subheader(f"📝 Test script used for execution ({script_lang})")
+                        if not result["success"] and steps_total > 0:
+                            st.caption("Script reflects the planned steps. Some steps may not have executed.")
                         col1, col2 = st.columns([3, 1])
                         with col1:
-                            st.markdown(f"**Language:** `{script_lang.upper()}`")
+                            st.markdown(f"**Language:** {script_lang.upper()} (from your selection)")
                             st.markdown(f"**File:** `{test_file}`")
                         with col2:
                             st.download_button(
@@ -145,62 +160,25 @@ with tab1:
                                 mime="text/plain",
                                 width="stretch"
                             )
-                        
-                        # Display script in code block
                         st.code(result["generated_script"], language=script_lang)
-                        
-                        # Instructions
                         with st.expander("ℹ️ How to run this script"):
                             st.markdown(f"""
-To run the generated Playwright script:
-
-1. **Install Playwright** (if not already installed):
+1. **Install Playwright** (if needed):
 ```bash
 npm init -y
 npm install -D @playwright/test
 npx playwright install
 ```
 
-2. **Save the script** as `{test_file}` in your project directory
-
-3. **Run the test**:
+2. **Save** as `{test_file}` and run:
 ```bash
 npx playwright test {test_file}
 ```
-
-4. **Run with UI Mode** (for debugging):
-```bash
-npx playwright test {test_file} --ui
-```
-
-5. **Run in headed mode**:
-```bash
-npx playwright test {test_file} --headed
-```
+Headed: `npx playwright test {test_file} --headed` · Debug: `--ui`
                             """)
                     
-                    # Show execution details
-                    st.divider()
-                    # Show execution details
-                    st.subheader("Execution Details")
-                    
-                    # Steps executed
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("Steps Executed", result["steps_executed"])
-                    col2.metric("Total Steps", result["total_steps"])
-                    sr = (result["steps_executed"] / result["total_steps"] * 100) if result["total_steps"] else 0
-                    col3.metric("Success Rate", f"{sr:.1f}%")
-                    
-                    # Step results
-                    if result["results"]:
-                        st.subheader("Step-by-Step Results")
-                        
-                        for i, step_result in enumerate(result["results"], 1):
-                            with st.expander(f"Step {i} - {'✓ SUCCESS' if step_result['success'] else '✗ FAILED'}"):
-                                st.json(step_result)
-                    
                 except requests.exceptions.Timeout:
-                    st.error("⏱️ Execution timed out (>5 minutes)")
+                    st.error(f"⏱️ Execution timed out (>{EXECUTE_TIMEOUT // 60} minutes). Increase EXECUTE_TIMEOUT in streamlit_app.py if needed.")
                 except requests.exceptions.ConnectionError:
                     st.error("🔌 Cannot connect to API. Is the backend running?")
                 except Exception as e:

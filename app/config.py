@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     
     # Browser Settings (always headed so user can see the browser)
     HEADLESS: bool = False
-    BROWSER_TIMEOUT: int = 60000  # 60s for slow pages (e.g. LG e-commerce)
+    BROWSER_TIMEOUT: int = 90000  # 90s for slow enterprise pages (e.g. LG e-commerce)
     
     # Execution Settings
     MAX_RETRIES: int = 3

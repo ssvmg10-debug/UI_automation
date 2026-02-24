@@ -93,9 +93,11 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
+    summary = metrics_collector.get_summary()
     return {
         "status": "healthy",
-        "timestamp": metrics_collector.get_summary()
+        "timestamp": summary,  # legacy key for UI compatibility
+        "metrics": summary,
     }
 
 
@@ -118,6 +120,8 @@ async def execute_test(request: ExecutionRequest):
     logger.info("Headless: %s | Max recovery: %s | Script lang: %s", request.headless, request.max_recovery_attempts, request.script_language)
     logger.info("=" * 60)
     
+    import time
+    start_time = time.monotonic()
     try:
         logger.info("[API] Creating orchestrator (use_v3=%s)...", request.use_v3)
         if request.use_v3:
@@ -139,22 +143,37 @@ async def execute_test(request: ExecutionRequest):
         
         logger.info("[API] Calling orchestrator.run() - see logs below for each step.")
         result = await orchestrator.run(request.instruction)
+        duration_seconds = time.monotonic() - start_time
         logger.info("[API] Orchestrator finished. Steps: %s/%s, success: %s", result.get("steps_executed"), result.get("total_steps"), result.get("success"))
         
-        # Generate script from execution steps
+        # Generate script from execution steps - ALWAYS show script even on partial/full failure
         generated_script = None
         file_extension = None
-        if result.get("steps"):
+        steps_for_script = result.get("steps")
+        if not steps_for_script and result.get("error"):
+            # Fallback: planner may not have run; try to get a plan for script display
+            try:
+                from app.agents.planner_agent import PlannerAgent
+                from app.agents.planner_post_processor_v3 import process_steps
+                planner = PlannerAgent()
+                steps_for_script = await planner.plan(request.instruction)
+                steps_for_script = process_steps(steps_for_script) if steps_for_script else []
+            except Exception:
+                pass
+        if steps_for_script:
             try:
                 script_gen = ScriptGenerator(language=request.script_language)
                 test_name = request.instruction[:50].replace(" ", "_").replace("'", "")
-                generated_script = script_gen.generate_script(result["steps"], test_name)
+                generated_script = script_gen.generate_script(steps_for_script, test_name)
                 file_extension = script_gen.get_file_extension()
                 logger.info(f"Generated {request.script_language} script")
             except Exception as e:
                 logger.warning(f"Failed to generate script: {e}")
         
-        # Complete metrics
+        # Update metrics with actual steps and duration before completing
+        if metrics_collector.current_execution:
+            metrics_collector.current_execution.steps_executed = result.get("steps_executed", 0)
+            metrics_collector.current_execution.steps_total = result.get("total_steps", 0)
         metrics_collector.complete_execution(result["success"])
         
         # Build response
@@ -163,7 +182,8 @@ async def execute_test(request: ExecutionRequest):
             steps_executed=result["steps_executed"],
             total_steps=result["total_steps"],
             results=result["results"],
-            error=result.get("error")
+            error=result.get("error"),
+            duration_seconds=round(duration_seconds, 2)
         )
         
         # Add generated script to response dict
@@ -229,10 +249,18 @@ async def websocket_execute(websocket: WebSocket):
             
             # Execute
             try:
-                orchestrator = AutomationOrchestrator(
-                    headless=data.get("headless", True),
-                    max_recovery_attempts=data.get("max_recovery_attempts", 2)
-                )
+                use_v3 = data.get("use_v3", True)
+                if use_v3:
+                    from app.orchestrator_v3 import AutomationOrchestratorV3
+                    orchestrator = AutomationOrchestratorV3(
+                        headless=data.get("headless", True),
+                        max_recovery_attempts=data.get("max_recovery_attempts", 2)
+                    )
+                else:
+                    orchestrator = AutomationOrchestrator(
+                        headless=data.get("headless", True),
+                        max_recovery_attempts=data.get("max_recovery_attempts", 2)
+                    )
                 
                 result = await orchestrator.run(instruction)
                 
