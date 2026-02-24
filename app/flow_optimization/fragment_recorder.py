@@ -24,9 +24,10 @@ def _extract_site(url: str) -> str:
 
 
 def _step_to_dict(step) -> Dict[str, Any]:
-    """Convert ExecutionStep to dict for fragment matching."""
+    """Convert ExecutionStep to dict for fragment matching (action normalized to uppercase)."""
+    action = getattr(step, "action", "")
     return {
-        "action": getattr(step, "action", ""),
+        "action": str(action).strip().upper() if action else "",
         "target": (getattr(step, "target", "") or "").strip(),
         "value": getattr(step, "value", None),
     }
@@ -109,5 +110,33 @@ def save_fragments(
                 flow_start_url[:50],
                 end_url[:50],
             )
+
+    # Also save "post-navigate" fragments so reuse works when we're already at the first page URL
+    # (e.g. at lg.com/us/ with upcoming [CLICK Monitors, ...] we need start_url=lg.com/us/, steps=[CLICK Monitors, ...])
+    first_step = steps[0] if steps else None
+    first_action = str(getattr(first_step, "action", "") or "").strip().upper()
+    if first_action == "NAVIGATE" and N >= 2 and len(step_end_urls) >= 1:
+        url_after_nav = (step_end_urls[0] or flow_start_url or "").rstrip("/")
+        if url_after_nav:
+            for k in range(2, N + 1):
+                step_dicts = [_step_to_dict(steps[i]) for i in range(1, k)]
+                end_url = end_urls[k - 1] if (k - 1) < len(end_urls) else None
+                if not end_url:
+                    continue
+                fragment = FlowFragment(
+                    site=site,
+                    start_url=url_after_nav,
+                    end_url=end_url.rstrip("/"),
+                    steps=step_dicts,
+                    success_count=1,
+                )
+                if fragment_store.save_or_update(fragment):
+                    saved += 1
+                    logger.info(
+                        "[FRAGMENT] Saved post-navigate fragment: %d steps, %s -> %s",
+                        len(step_dicts),
+                        url_after_nav[:50],
+                        end_url[:50],
+                    )
 
     return saved

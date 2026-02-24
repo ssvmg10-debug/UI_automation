@@ -44,6 +44,10 @@ app.add_middleware(
 # Global orchestrator instance
 orchestrator = None
 
+# Execution cache: same test case (normalized instruction + script_lang) -> cached response for reuse
+_execution_cache: dict = {}
+_EXECUTION_CACHE_TTL_SECONDS = 3600  # 1 hour
+
 
 class ExecutionRequest(BaseModel):
     """Request model for test execution."""
@@ -52,6 +56,7 @@ class ExecutionRequest(BaseModel):
     max_recovery_attempts: int = 2
     script_language: Literal["javascript", "typescript"] = "typescript"
     use_v3: bool = False  # Use SAM-V3 engine (SmartLocator) when True
+    force_run: bool = False  # If True, run even when same test was run recently (bypass cache)
 
 
 class ExecutionResponse(BaseModel):
@@ -62,6 +67,12 @@ class ExecutionResponse(BaseModel):
     results: List[Dict[str, Any]]
     error: Optional[str] = None
     duration_seconds: Optional[float] = None
+    # Generated test script (JavaScript or TypeScript per user selection) - always returned when steps exist
+    generated_script: Optional[str] = None
+    script_language: Optional[str] = None
+    file_extension: Optional[str] = None
+    # Script containing only the steps that executed successfully (for partial runs e.g. 6/24)
+    generated_script_executed: Optional[str] = None
 
 
 @app.on_event("startup")
@@ -101,17 +112,28 @@ async def health_check():
     }
 
 
+def _execution_cache_key(instruction: str, script_language: str) -> str:
+    """Normalize instruction for cache key (strip, collapse whitespace)."""
+    import hashlib
+    normalized = " ".join((instruction or "").strip().split())
+    return hashlib.sha256(f"{normalized}|{script_language}".encode()).hexdigest()
+
+
 @app.post("/execute", response_model=ExecutionResponse)
 async def execute_test(request: ExecutionRequest):
     """
     Execute test from natural language instruction.
-    
-    Args:
-        request: Execution request with instruction
-        
-    Returns:
-        Execution response with results
+    Reuses cached result when the same test case was run recently (unless force_run=True).
     """
+    import time
+    cache_key = _execution_cache_key(request.instruction, request.script_language)
+    if not request.force_run and cache_key in _execution_cache:
+        entry = _execution_cache[cache_key]
+        if (time.monotonic() - entry["ts"]) < _EXECUTION_CACHE_TTL_SECONDS:
+            logger.info("[API] Returning cached result for same test case (use force_run=true to re-run)")
+            return entry["response"]
+        del _execution_cache[cache_key]
+
     # Print so it shows even if logging is buffered (e.g. uvicorn --reload child on Windows)
     print("\n[BACKEND] POST /execute received - running test...", flush=True)
     logger.info("=" * 60)
@@ -120,7 +142,6 @@ async def execute_test(request: ExecutionRequest):
     logger.info("Headless: %s | Max recovery: %s | Script lang: %s", request.headless, request.max_recovery_attempts, request.script_language)
     logger.info("=" * 60)
     
-    import time
     start_time = time.monotonic()
     try:
         logger.info("[API] Creating orchestrator (use_v3=%s)...", request.use_v3)
@@ -160,6 +181,7 @@ async def execute_test(request: ExecutionRequest):
                 steps_for_script = process_steps(steps_for_script) if steps_for_script else []
             except Exception:
                 pass
+        generated_script_executed = None
         if steps_for_script:
             try:
                 script_gen = ScriptGenerator(language=request.script_language)
@@ -167,6 +189,16 @@ async def execute_test(request: ExecutionRequest):
                 generated_script = script_gen.generate_script(steps_for_script, test_name)
                 file_extension = script_gen.get_file_extension()
                 logger.info(f"Generated {request.script_language} script")
+
+                # For partial runs: script with only the steps that executed successfully (first N steps)
+                steps_ok = result.get("steps_executed", 0)
+                if steps_ok > 0 and steps_ok < len(steps_for_script):
+                    success_steps = steps_for_script[:steps_ok]
+                    generated_script_executed = script_gen.generate_script(
+                        success_steps,
+                        test_name + "_executed_only"
+                    )
+                    logger.info("Generated script for executed steps only (%s steps)", len(success_steps))
             except Exception as e:
                 logger.warning(f"Failed to generate script: {e}")
         
@@ -176,23 +208,22 @@ async def execute_test(request: ExecutionRequest):
             metrics_collector.current_execution.steps_total = result.get("total_steps", 0)
         metrics_collector.complete_execution(result["success"])
         
-        # Build response
-        response_data = ExecutionResponse(
+        # Build response (include generated script so UI can show it per user's language selection)
+        response = ExecutionResponse(
             success=result["success"],
             steps_executed=result["steps_executed"],
             total_steps=result["total_steps"],
             results=result["results"],
             error=result.get("error"),
-            duration_seconds=round(duration_seconds, 2)
+            duration_seconds=round(duration_seconds, 2),
+            generated_script=generated_script,
+            script_language=request.script_language,
+            file_extension=file_extension or (".ts" if request.script_language == "typescript" else ".js"),
+            generated_script_executed=generated_script_executed,
         )
-        
-        # Add generated script to response dict
-        response_dict = response_data.dict()
-        response_dict["generated_script"] = generated_script
-        response_dict["script_language"] = request.script_language
-        response_dict["file_extension"] = file_extension
-        
-        return response_dict
+        # Cache for reuse when same test is run again (saves execution time)
+        _execution_cache[cache_key] = {"response": response, "ts": start_time}
+        return response
         
     except Exception as e:
         logger.error(f"Execution failed: {e}")

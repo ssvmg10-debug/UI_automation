@@ -61,18 +61,28 @@ def normalize_target(target: str) -> str:
 def process_steps(steps: List[ExecutionStep]) -> List[ExecutionStep]:
     """
     Post-process planner output: normalize targets, detect flows.
+    Marks "Close" (popup) steps as optional so the run does not fail when no popup is visible.
     Returns new steps with normalized targets.
     """
     result = []
     for step in steps:
         new_target = normalize_target(step.target or "")
+        # "Close if any popup" -> CLICK('Close'); make optional so we don't fail when no popup
+        is_optional_close = (
+            step.action == "CLICK"
+            and (new_target or step.target or "").strip().lower() == "close"
+        )
+        optional = step.optional or is_optional_close
         new_step = ExecutionStep(
             action=step.action,
             target=new_target or step.target,
             value=step.value,
             region=step.region,
+            optional=optional,
         )
         result.append(new_step)
         if new_target != (step.target or ""):
             logger.debug("[POST_PROC] %s '%s' -> '%s'", step.action, (step.target or "")[:40], new_target[:40])
+        if is_optional_close:
+            logger.debug("[POST_PROC] CLICK 'Close' marked optional (skip if not found)")
     return result

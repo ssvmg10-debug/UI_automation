@@ -107,6 +107,16 @@ class BrowserManager:
             raise RuntimeError("Browser not started")
         return self.page
 
+    def set_page(self, page: Page) -> None:
+        """
+        Switch current page (e.g. after checkout opens in a new tab).
+        Caller must ensure the page belongs to this browser's context.
+        """
+        self.page = page
+        if page:
+            page.set_default_timeout(self.timeout)
+        logger.info("[BROWSER] Switched to page: %s", page.url[:80] if page and page.url else "n/a")
+
 
 class SessionManager:
     """Manages multiple browser sessions for parallel execution."""

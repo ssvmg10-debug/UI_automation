@@ -197,6 +197,31 @@ class AutomationOrchestratorV3:
             else:
                 result = ActionResult(success=False, error=f"Unknown action: {step.action}")
 
+            # Optional steps (e.g. "Close if any popup"): treat "element not found" as success
+            if not result.success and getattr(step, "optional", False):
+                err = (result.error or "").lower()
+                if "unable to locate" in err or "not found" in err or "not visible" in err:
+                    logger.info("[ORCH_V3] Optional step (element not present); continuing")
+                    result = ActionResult(success=True)
+
+            # If checkout click succeeded, check for new tab (some sites open checkout in new tab)
+            if result.success and step.action == "CLICK" and (step.target or "").strip().lower() == "checkout":
+                try:
+                    import asyncio
+                    await asyncio.sleep(2)
+                    context = page.context
+                    pages = context.pages
+                    if len(pages) > 1:
+                        for p in pages:
+                            if p != page and "checkout" in (p.url or "").lower():
+                                bm.set_page(p)
+                                page = p
+                                logger.info("[ORCH_V3] Switched to checkout tab: %s", (page.url or "")[:80])
+                                break
+                except Exception as e:
+                    logger.debug("[ORCH_V3] Checkout tab check: %s", e)
+                page = await bm.get_page()
+
             if result.success and result.after_state and state.get("state_manager"):
                 await state["state_manager"].record_state(page, action=step.action, element_used=None)
 

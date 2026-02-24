@@ -43,9 +43,10 @@ class FragmentMatcher:
             return False
         for i, sa in enumerate(a):
             sb = b[i]
-            if (sa.get("action") != sb.get("action")) or (
-                (sa.get("target") or "").strip().lower()
-                != (sb.get("target") or "").strip().lower()
-            ):
+            action_a = str(sa.get("action") or "").strip().upper()
+            action_b = str(sb.get("action") or "").strip().upper()
+            target_a = (sa.get("target") or "").strip().lower()
+            target_b = (sb.get("target") or "").strip().lower()
+            if action_a != action_b or target_a != target_b:
                 return False
         return True

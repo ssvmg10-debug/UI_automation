@@ -24,12 +24,14 @@ class ExecutionStep:
         action: str,
         target: str,
         value: Optional[str] = None,
-        region: Optional[str] = None
+        region: Optional[str] = None,
+        optional: bool = False
     ):
         self.action = action
         self.target = target
         self.value = value
         self.region = region
+        self.optional = optional
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -37,7 +39,8 @@ class ExecutionStep:
             "action": self.action,
             "target": self.target,
             "value": self.value,
-            "region": self.region
+            "region": self.region,
+            "optional": self.optional
         }
     
     def __repr__(self) -> str:
@@ -112,7 +115,8 @@ class PlannerAgent:
                         action=step_dict.get("action", ""),
                         target=step_dict.get("target", ""),
                         value=step_dict.get("value"),
-                        region=step_dict.get("region")
+                        region=step_dict.get("region"),
+                        optional=bool(step_dict.get("optional", False))
                     ))
                 return execution_steps
         except Exception as e:
@@ -228,7 +232,9 @@ Guidelines:
 - Use CLICK for clicking buttons/links
 - Use TYPE for entering text in inputs (target=field label, value=text to type)
 - Use WAIT for: (1) waiting for an element (target=element text), or (2) waiting N seconds (use value: "N" e.g. value: "5" for "wait 5 seconds")
-- Use SELECT for dropdown selections
+- For "wait for X or Y to appear" use a single WAIT with target: "X or Y" (e.g. "Contact Information or Email") so the runner can try either
+- Use SELECT for dropdown selections (target=dropdown label e.g. "State", value=option e.g. "AL")
+- For "Close if any popup" use CLICK with target "Close" (this step is optional and will be skipped if no popup is visible)
 - Be specific with target text; extract exact button/link text when possible
 - For "wait for 5 seconds" or "wait 5 seconds" output WAIT with value: "5"
 
@@ -254,10 +260,10 @@ Output:
                 action=step_data.get("action", "").upper(),
                 target=step_data.get("target", ""),
                 value=step_data.get("value"),
-                region=step_data.get("region")
+                region=step_data.get("region"),
+                optional=bool(step_data.get("optional", False))
             )
             steps.append(step)
-        
         return steps
     
     async def expand_synonyms(self, target_text: str) -> List[str]:

@@ -8,6 +8,7 @@ from playwright.async_api import Page
 from typing import Optional
 import asyncio
 import logging
+import re
 
 from app.locator_engine_v3.action_resolver_v3 import ActionResolverV3
 from app.core.outcome_validator import OutcomeValidator
@@ -41,6 +42,16 @@ class ActionExecutorV3:
     def _is_all_checkboxes_flow(self, target: str) -> bool:
         t = (target or "").lower()
         return "checkbox" in t or "checkboxes" in t or "terms" in t or "agree" in t
+
+    def _is_add_to_cart_flow(self, target: str) -> bool:
+        """Detect Add to Cart / Add to Bag so we wait for cart to update before proceeding."""
+        t = (target or "").lower()
+        return "add to cart" in t or "add to bag" in t or "add to basket" in t
+
+    def _is_checkout_flow(self, target: str) -> bool:
+        """Detect Checkout button so we wait for the checkout page (Contact Information) before proceeding."""
+        t = (target or "").lower().strip()
+        return t == "checkout" or t == "proceed to checkout" or "checkout" in t and "express" not in t
 
     async def navigate(self, page: Page, url: str) -> ActionResult:
         """Navigate to URL."""
@@ -97,6 +108,23 @@ class ActionExecutorV3:
                 success = await force_click_with_js(page, locator)
             
             if success:
+                # Add-to-cart often updates via AJAX; wait for cart to update before next step (e.g. Checkout)
+                if self._is_add_to_cart_flow(target):
+                    wait_cart = 2.5
+                    logger.info("[EXECUTOR_V3] Add-to-cart detected: waiting %.1fs for cart to update", wait_cart)
+                    await asyncio.sleep(wait_cart)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=3000)
+                    except Exception:
+                        pass
+                # After clicking Checkout, wait for the checkout page (Contact Information) to load before proceeding
+                if self._is_checkout_flow(target):
+                    logger.info("[EXECUTOR_V3] Checkout click detected: waiting for checkout page (Contact Information)")
+                    contact_loc = await smart_wait_for_element(page, "Contact Information", timeout=20000, check_interval=800)
+                    if contact_loc:
+                        logger.info("[EXECUTOR_V3] Checkout page loaded: Contact Information visible")
+                    else:
+                        logger.warning("[EXECUTOR_V3] Contact Information not found within 20s; proceeding anyway")
                 await asyncio.sleep(wait_after)
                 after = await self.validator.capture_state(page)
                 # Clear DOM cache on navigation (new page = fresh scan for inputs/clickables)
@@ -170,22 +198,117 @@ class ActionExecutorV3:
 
         locator = await self.resolver.resolve_select(page, target)
         if not locator:
+            # Fallback: try common select/combobox patterns by label/role/text before failing.
+            target_text = target or ""
+            try:
+                target_pattern = re.compile(re.escape(target_text), re.I) if target_text else None
+            except re.error:
+                target_pattern = None
+
+            # 1) Try standard label-based lookup (e.g. "State", "Country/Region").
+            try:
+                label_loc = page.get_by_label(target_text, exact=False)
+                if await label_loc.count() > 0:
+                    field = label_loc.first
+                    # Prefer select-style interaction when possible.
+                    try:
+                        await field.select_option(value)
+                    except Exception:
+                        # If it's not a <select>, try filling, or inner select/input.
+                        try:
+                            await field.fill(value)
+                        except Exception:
+                            try:
+                                handle = await field.element_handle()
+                                if handle:
+                                    inner_select = handle.locator("select").first
+                                    if await inner_select.is_visible():
+                                        await inner_select.select_option(value)
+                                    else:
+                                        inner_input = handle.locator("input, textarea").first
+                                        if await inner_input.is_visible():
+                                            await inner_input.fill(value)
+                            except Exception:
+                                pass
+                    after = await self.validator.capture_state(page)
+                    return ActionResult(success=True, before_state=before, after_state=after)
+            except Exception:
+                # Swallow and continue to other fallbacks.
+                pass
+
+            # 2) Try ARIA combobox by role/name (for custom dropdowns).
+            if target_pattern:
+                try:
+                    combo = page.get_by_role("combobox", name=target_pattern).first
+                    if await combo.is_visible():
+                        try:
+                            await combo.select_option(value)
+                        except Exception:
+                            await combo.fill(value)
+                        after = await self.validator.capture_state(page)
+                        return ActionResult(success=True, before_state=before, after_state=after)
+                except Exception:
+                    pass
+
+            # 3) As a last resort, click a visible element containing the target text,
+            #    then click an option containing the value text.
+            try:
+                text_loc = page.get_by_text(target_text, exact=False).first
+                if await text_loc.is_visible():
+                    await text_loc.click(timeout=3000)
+                    option_loc = page.get_by_text(value or "", exact=False).first
+                    if await option_loc.is_visible():
+                        await option_loc.click(timeout=3000)
+                        after = await self.validator.capture_state(page)
+                        return ActionResult(success=True, before_state=before, after_state=after)
+            except Exception:
+                pass
+
             return ActionResult(success=False, error=f"Unable to locate: {target}", before_state=before)
+
+        # Locator found: either native <select> (select_option) or custom dropdown (click to open, then click option)
         try:
-            await locator.click(timeout=15000)  # 15s for slow enterprise pages
-            await asyncio.sleep(0.3)
+            tag_name = await locator.evaluate("el => (el && el.tagName) ? el.tagName.toLowerCase() : ''")
+            if tag_name == "select":
+                await locator.select_option(value, timeout=15000)
+                await asyncio.sleep(0.2)
+                after = await self.validator.capture_state(page)
+                return ActionResult(success=True, before_state=before, after_state=after)
+            # Custom dropdown: click to open, then click the option with the value text
+            await locator.click(timeout=15000)
+            await asyncio.sleep(0.4)
+            option_value = (value or "").strip()
+            if option_value:
+                option_loc = page.get_by_role("option", name=re.compile(re.escape(option_value), re.I)).first
+                try:
+                    if await option_loc.is_visible():
+                        await option_loc.click(timeout=5000)
+                    else:
+                        option_loc = page.get_by_text(option_value, exact=False).first
+                        if await option_loc.is_visible():
+                            await option_loc.click(timeout=5000)
+                except Exception:
+                    option_loc = page.get_by_text(option_value, exact=False).first
+                    if await option_loc.is_visible():
+                        await option_loc.click(timeout=5000)
+            await asyncio.sleep(0.2)
             after = await self.validator.capture_state(page)
             return ActionResult(success=True, before_state=before, after_state=after)
         except Exception as e:
             return ActionResult(success=False, error=str(e), before_state=before)
 
     async def wait_for_element(self, page: Page, target_text: str, timeout: float = 60.0) -> ActionResult:
-        """Wait for element to appear with smart overlay handling."""
-        logger.info("[EXECUTOR_V3] WAIT for: '%s'", (target_text or "")[:50])
-        
-        # Use smart wait with overlay dismissal
-        locator = await smart_wait_for_element(page, target_text or "", timeout=int(timeout * 1000))
-        
-        if locator:
-            return ActionResult(success=True)
-        return ActionResult(success=False, error=f"Timeout waiting for '{target_text}'")
+        """Wait for element to appear. Supports alternatives: 'Contact Information or Email' tries each until one is found."""
+        raw = (target_text or "").strip()
+        logger.info("[EXECUTOR_V3] WAIT for: '%s'", raw[:60])
+        timeout_ms = int(timeout * 1000)
+        # Support "X or Y" so checkout can wait for "Contact Information" or "Email" (whichever appears first)
+        parts = [p.strip() for p in raw.split(" or ") if p.strip()]
+        if not parts:
+            parts = [raw]
+        per_part_ms = max(5000, timeout_ms // len(parts))
+        for i, part in enumerate(parts):
+            locator = await smart_wait_for_element(page, part, timeout=per_part_ms)
+            if locator:
+                return ActionResult(success=True)
+        return ActionResult(success=False, error=f"Timeout waiting for '{raw}'")

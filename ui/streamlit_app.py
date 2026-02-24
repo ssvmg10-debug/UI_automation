@@ -24,8 +24,12 @@ st.set_page_config(
 )
 
 # API endpoint - from env or API_HOST:API_PORT (matches backend config)
+# Use localhost when backend binds to 0.0.0.0 so the UI (client) can reach it
+_api_host = os.environ.get("API_HOST", "localhost").strip()
+if _api_host == "0.0.0.0":
+    _api_host = "localhost"
 API_BASE_URL = os.environ.get("API_BASE_URL") or (
-    f"http://{os.environ.get('API_HOST', 'localhost')}:{os.environ.get('API_PORT', '8000')}"
+    f"http://{_api_host}:{os.environ.get('API_PORT', '8002')}"
 )
 
 # Execution timeout (seconds) - keep high so long enterprise tests complete and UI gets response/script
@@ -57,6 +61,11 @@ with st.sidebar:
         index=0,
         help="Choose the language for the generated Playwright script"
     )
+    force_run = st.checkbox(
+        "Force re-run (bypass cache)",
+        value=False,
+        help="If the same test was run recently, result is reused. Check to run again and skip cache."
+    )
     
     st.divider()
     
@@ -67,10 +76,30 @@ with st.sidebar:
         health = requests.get(f"{API_BASE_URL}/health", timeout=5).json()
         st.success("✓ System Healthy")
         summary = health.get("timestamp") or health.get("metrics") or {}
-        st.metric("Total Executions", summary.get("total_executions", 0))
-        if summary.get("total_executions", 0) > 0:
-            st.metric("Success Rate", f"{summary.get('success_rate', 0):.1f}%")
-    except (requests.exceptions.RequestException, KeyError) as e:
+
+        # Previous summary (for deltas)
+        prev_summary = st.session_state.get("prev_metrics_summary_sidebar")
+
+        # Total executions (with delta vs previous)
+        total_exec = summary.get("total_executions", 0)
+        prev_total_exec = prev_summary.get("total_executions", 0) if prev_summary else None
+        total_delta = None
+        if prev_total_exec is not None and total_exec != prev_total_exec:
+            total_delta = total_exec - prev_total_exec
+        st.metric("Total Executions", total_exec, delta=total_delta)
+
+        # Success rate (with delta vs previous)
+        if total_exec > 0:
+            curr_sr = float(summary.get("success_rate", 0) or 0.0)
+            prev_sr = float(prev_summary.get("success_rate", 0) or 0.0) if prev_summary else None
+            sr_delta = None
+            if prev_sr is not None:
+                sr_delta = f"{curr_sr - prev_sr:+.1f} pts"
+            st.metric("Success Rate", f"{curr_sr:.1f}%", delta=sr_delta)
+
+        # Persist for next render so we can show "previous" metrics
+        st.session_state["prev_metrics_summary_sidebar"] = summary
+    except (requests.exceptions.RequestException, KeyError):
         st.error("✗ API Unreachable")
     
     st.caption("Backend logs: logs\\backend.log, logs\\uvicorn.log")
@@ -109,7 +138,8 @@ with tab1:
                             "headless": False,
                             "max_recovery_attempts": max_recovery,
                             "script_language": script_language,
-                            "use_v3": use_v3
+                            "use_v3": use_v3,
+                            "force_run": force_run,
                         },
                         timeout=EXECUTE_TIMEOUT
                     )
@@ -139,18 +169,56 @@ with tab1:
                         st.error(f"❌ Test Failed: {err_msg}")
                         st.caption(f"Steps completed: {steps_ok}/{steps_total}")
                     
-                    # Test script used to execute these steps (TypeScript or JavaScript per user selection)
-                    if result.get("generated_script"):
-                        st.divider()
-                        script_lang = result.get("script_language", "typescript")
-                        file_ext = result.get("file_extension", ".ts")
-                        test_file = f"test{file_ext}"
-                        st.subheader(f"📝 Test script used for execution ({script_lang})")
-                        if not result["success"] and steps_total > 0:
-                            st.caption("Script reflects the planned steps. Some steps may not have executed.")
+                    # ---------- Test script (JavaScript or TypeScript per user selection) ----------
+                    st.divider()
+                    st.subheader("📝 Test script used for execution")
+                    script_lang = result.get("script_language") or script_language or "typescript"
+                    file_ext = result.get("file_extension") or (".ts" if script_lang == "typescript" else ".js")
+                    test_file = f"test{file_ext}"
+                    # Show executed-only script when we have it (partial run); always show script section
+                    has_partial = steps_total > 0 and result.get("generated_script_executed")
+
+                    if has_partial:
+                        # Partial run (e.g. 6/24): show script for executed steps first, then full plan
+                        st.caption(f"Language: **{script_lang.upper()}** (from your selection in the sidebar)")
+                        st.markdown(f"**Script for steps that executed successfully ({steps_ok} steps)**")
+                        st.download_button(
+                            label=f"📥 Download executed-only {file_ext}",
+                            data=result["generated_script_executed"],
+                            file_name=f"test_executed_only{file_ext}",
+                            mime="text/plain",
+                            key="download_script_executed",
+                        )
+                        st.code(result["generated_script_executed"], language=script_lang)
+                        with st.expander(f"📄 Full planned script ({steps_total} steps)"):
+                            st.code(result.get("generated_script") or "", language=script_lang)
+                            st.download_button(
+                                label=f"📥 Download full script",
+                                data=result.get("generated_script") or "",
+                                file_name=test_file,
+                                mime="text/plain",
+                                key="download_script_full",
+                            )
+                        with st.expander("ℹ️ How to run this script"):
+                            st.markdown(f"""
+1. **Install Playwright** (if needed):
+```bash
+npm init -y
+npm install -D @playwright/test
+npx playwright install
+```
+
+2. **Executed-only script** (reproduces the {steps_ok} steps that ran): save as `test_executed_only{file_ext}` and run:
+```bash
+npx playwright test test_executed_only{file_ext}
+```
+3. **Full script** (all {steps_total} steps): save as `{test_file}` to run or edit from step {steps_ok + 1}.
+Headed: add `--headed` · Debug: `--ui`
+                            """)
+                    elif result.get("generated_script"):
+                        st.caption(f"Language: **{script_lang.upper()}** (from your selection in the sidebar)")
                         col1, col2 = st.columns([3, 1])
                         with col1:
-                            st.markdown(f"**Language:** {script_lang.upper()} (from your selection)")
                             st.markdown(f"**File:** `{test_file}`")
                         with col2:
                             st.download_button(
@@ -158,7 +226,7 @@ with tab1:
                                 data=result["generated_script"],
                                 file_name=test_file,
                                 mime="text/plain",
-                                width="stretch"
+                                key="download_script",
                             )
                         st.code(result["generated_script"], language=script_lang)
                         with st.expander("ℹ️ How to run this script"):
@@ -176,6 +244,8 @@ npx playwright test {test_file}
 ```
 Headed: `npx playwright test {test_file} --headed` · Debug: `--ui`
                             """)
+                    else:
+                        st.info("No script was generated for this run (e.g. no steps could be planned). Try again or check backend logs.")
                     
                 except requests.exceptions.Timeout:
                     st.error(f"⏱️ Execution timed out (>{EXECUTE_TIMEOUT // 60} minutes). Increase EXECUTE_TIMEOUT in streamlit_app.py if needed.")
@@ -195,29 +265,71 @@ with tab2:
     try:
         # Get summary
         summary = requests.get(f"{API_BASE_URL}/metrics/summary").json()
+
+        # Previous summary (for deltas)
+        prev_summary = st.session_state.get("prev_metrics_summary_tab")
         
         # Display summary
         col1, col2, col3, col4 = st.columns(4)
+
+        total_exec = summary.get("total_executions", 0)
+        prev_total_exec = prev_summary.get("total_executions", 0) if prev_summary else None
+        total_delta = None
+        if prev_total_exec is not None and total_exec != prev_total_exec:
+            total_delta = total_exec - prev_total_exec
+
+        successful = summary.get("successful", 0)
+        prev_successful = prev_summary.get("successful", 0) if prev_summary else None
+        successful_delta = None
+        if prev_successful is not None and successful != prev_successful:
+            successful_delta = successful - prev_successful
+
+        failed = summary.get("failed", 0)
+        prev_failed = prev_summary.get("failed", 0) if prev_summary else None
+        failed_delta = None
+        if prev_failed is not None and failed != prev_failed:
+            failed_delta = failed - prev_failed
+
+        curr_sr = float(summary.get("success_rate", 0) or 0.0)
+        prev_sr = float(prev_summary.get("success_rate", 0) or 0.0) if prev_summary else None
+        sr_delta = None
+        if prev_sr is not None:
+            sr_delta = f"{curr_sr - prev_sr:+.1f} pts"
         
         with col1:
-            st.metric("Total Executions", summary["total_executions"])
+            st.metric("Total Executions", total_exec, delta=total_delta)
         
         with col2:
-            st.metric("Successful", summary["successful"])
+            st.metric("Successful", successful, delta=successful_delta)
         
         with col3:
-            st.metric("Failed", summary["failed"])
+            st.metric("Failed", failed, delta=failed_delta)
         
         with col4:
-            st.metric("Success Rate", f"{summary['success_rate']:.1f}%")
+            st.metric("Success Rate", f"{curr_sr:.1f}%", delta=sr_delta)
         
         col1, col2 = st.columns(2)
+
+        avg_dur = float(summary.get("average_duration", 0.0) or 0.0)
+        prev_avg_dur = float(prev_summary.get("average_duration", 0.0) or 0.0) if prev_summary else None
+        avg_dur_delta = None
+        if prev_avg_dur is not None:
+            avg_dur_delta = f"{avg_dur - prev_avg_dur:+.2f}s"
+
+        total_dur = float(summary.get("total_duration", 0.0) or 0.0)
+        prev_total_dur = float(prev_summary.get("total_duration", 0.0) or 0.0) if prev_summary else None
+        total_dur_delta = None
+        if prev_total_dur is not None:
+            total_dur_delta = f"{total_dur - prev_total_dur:+.2f}s"
         
         with col1:
-            st.metric("Average Duration", f"{summary['average_duration']:.2f}s")
+            st.metric("Average Duration", f"{avg_dur:.2f}s", delta=avg_dur_delta)
         
         with col2:
-            st.metric("Total Duration", f"{summary['total_duration']:.2f}s")
+            st.metric("Total Duration", f"{total_dur:.2f}s", delta=total_dur_delta)
+
+        # Persist for next render so we can show "previous" metrics
+        st.session_state["prev_metrics_summary_tab"] = summary
         
         # Recent executions
         st.subheader("Recent Executions")

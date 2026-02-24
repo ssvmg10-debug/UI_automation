@@ -181,8 +181,10 @@ async def smart_wait_for_element(
     check_interval: int = 1000
 ) -> Optional[Locator]:
     """
-    Wait for element with periodic overlay dismissal.
+    Wait for element with one-time overlay dismissal at start only.
     Uses multiple strategies: text, label, role, and scroll to find elements.
+    Overlay dismissal is not repeated during the wait so we don't close panels
+    that contain the target (e.g. checkout drawer with "Contact Information").
     Returns locator if found, None otherwise.
     """
     try:
@@ -212,19 +214,26 @@ async def smart_wait_for_element(
     
     checks = 0
     last_scroll_y = 0
+    overlay_dismissed_once = False
+
     def _now():
         try:
             return asyncio.get_running_loop().time()
         except RuntimeError:
             return __import__("time").monotonic()
+
     while _now() < max_time:
         checks += 1
-        
+
         try:
-            # Check for overlays every few attempts
-            if checks % 3 == 0:
+            # Dismiss overlays only once at the start (e.g. cookie banner). Do NOT
+            # dismiss periodically: the target content (e.g. "Contact Information")
+            # may be inside a fixed panel (checkout drawer); dismissing it would
+            # close the very panel we're waiting for.
+            if not overlay_dismissed_once:
                 await detect_and_dismiss_overlays(page)
-            
+                overlay_dismissed_once = True
+
             # Try each strategy
             for name, get_locator in _try_strategies():
                 try:
